@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """WayClick — autoclicker para Wayland via /dev/uinput (kernel), sem X11."""
-import fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil, struct
+import ctypes, fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil
+import struct
 import signal, subprocess, sys, tempfile, threading, time, wave
 
 try:
-    from PySide6.QtCore import Qt, QObject, QRectF, QTimer, QUrl, Signal
+    from PySide6.QtCore import (Qt, QObject, QRectF, QTimer, QUrl, Signal,
+                                Slot)
     from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
                                QKeySequence, QPainter, QPen, QPixmap,
                                QShortcut)
     from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                    QFormLayout, QDoubleSpinBox, QGroupBox,
                                    QHBoxLayout, QLabel, QMenu, QMenuBar,
-                                   QMessageBox, QPushButton, QSpinBox,
-                                   QSystemTrayIcon, QVBoxLayout, QWidget)
+                                   QMessageBox, QPushButton, QScrollArea,
+                                   QSpinBox, QSystemTrayIcon, QVBoxLayout,
+                                   QWidget, QFrame)
 except ImportError:
     sys.exit("PySide6 is required.\n"
              "  Fedora/RHEL:   sudo dnf install python3-pyside6\n"
@@ -21,7 +24,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----
@@ -151,11 +154,16 @@ class VirtualMouse:
         return uinput_node(self.fd)
 
     @staticmethod
+    def edge(code, value):
+        """Um flanco do botão (press ou release) + SYN, em um write só."""
+        return (struct.pack(EVENT_FMT, 0, 0, EV_KEY, code, value)
+                + struct.pack(EVENT_FMT, 0, 0, EV_SYN, SYN_REPORT, 0))
+
+    @staticmethod
     def packet(code):
-        """press + SYN + release + SYN em um único write (4x mais barato)."""
-        ev = lambda t, c, v: struct.pack(EVENT_FMT, 0, 0, t, c, v)
-        return (ev(EV_KEY, code, 1) + ev(EV_SYN, SYN_REPORT, 0)
-                + ev(EV_KEY, code, 0) + ev(EV_SYN, SYN_REPORT, 0))
+        """press + release colados. Serve para quem escuta evento, mas some
+        para quem consulta estado — ver o comentário em HOLD_S."""
+        return VirtualMouse.edge(code, 1) + VirtualMouse.edge(code, 0)
 
     def _emit(self, etype, code, value):
         os.write(self.fd, struct.pack(EVENT_FMT, 0, 0, etype, code, value))
@@ -238,8 +246,12 @@ class VirtualKeyboard:
         return (struct.pack(EVENT_FMT, 0, 0, EV_KEY, code, value)
                 + struct.pack(EVENT_FMT, 0, 0, EV_SYN, SYN_REPORT, 0))
 
-    def tap(self, code):
-        os.write(self.fd, self.packet(code, 1) + self.packet(code, 0))
+    def tap(self, code, hold=0.04):
+        """Aperta, segura e solta. O hold não é enfeite: com press e release
+        colados a tecla não existe para quem consulta estado por quadro."""
+        os.write(self.fd, self.packet(code, 1))
+        time.sleep(hold)
+        os.write(self.fd, self.packet(code, 0))
 
     def set(self, code, down):
         os.write(self.fd, self.packet(code, 1 if down else 0))
@@ -304,10 +316,13 @@ class AntiAfk(threading.Thread):
 class KeyMacro(threading.Thread):
     """Repete uma tecla no intervalo dado, ou a mantém pressionada."""
 
+    HOLD_S = 0.04
+
     def __init__(self, kb, interval_ms, keycode, hold=False):
         super().__init__(daemon=True)
         self.kb, self.code, self.hold = kb, keycode, hold
         self.interval = max(interval_ms, 1) / 1000.0
+        self.press_time = min(self.HOLD_S, self.interval * 0.5)
         self._stop = threading.Event()
         self.count = 0
 
@@ -319,7 +334,9 @@ class KeyMacro(threading.Thread):
             else:
                 nxt = time.perf_counter()
                 while not self._stop.is_set():
-                    self.kb.tap(self.code)
+                    self.kb.set(self.code, True)
+                    self._stop.wait(self.press_time)
+                    self.kb.set(self.code, False)
                     self.count += 1
                     nxt += self.interval
                     rest = nxt - time.perf_counter()
@@ -348,6 +365,7 @@ class Clicker(threading.Thread):
     busy-wait — é o que permite chegar em 0,1 ms (10.000 cliques/s).
     """
     SPIN_S = 0.0006  # busy-wait nos últimos 600 us
+    HOLD_S = 0.04    # ver abaixo
 
     def __init__(self, mouse, interval_ms, button, limit=0):
         super().__init__(daemon=True)
@@ -355,9 +373,25 @@ class Clicker(threading.Thread):
         self.interval = max(interval_ms, 0.1) / 1000.0
         # busy-wait curto: só o suficiente pra cobrir a granularidade do sleep
         self.spin = min(self.SPIN_S, self.interval * 0.3)
-        self.packet = VirtualMouse.packet(button)
+        # O botão precisa ficar baixo por um tempo real. Jogo não escuta evento,
+        # ele pergunta "o botão está apertado?" a cada quadro; com press e
+        # release colados, medimos 0 de 126 quadros pegando o botão baixo — o
+        # clique simplesmente não existia para ele. Metade do intervalo, no
+        # máximo 40 ms: a 100 ms dá 40 ms (uns 2,7 quadros a 60 fps) e a 0,1 ms
+        # dá 50 us, preservando os 10.000 cliques/s.
+        self.hold = min(self.HOLD_S, self.interval * 0.5)
+        self.press = VirtualMouse.edge(button, 1)
+        self.release = VirtualMouse.edge(button, 0)
         self._stop = threading.Event()
         self.count = 0
+
+    def _until(self, deadline):
+        """Dorme o grosso e queima o resto em busy-wait."""
+        rest = deadline - time.perf_counter() - self.spin
+        if rest > 0:
+            self._stop.wait(rest)
+        while time.perf_counter() < deadline:
+            pass
 
     def run(self):
         try:  # ajuda a estabilizar o jitter; falha silenciosa sem privilégio
@@ -367,21 +401,19 @@ class Clicker(threading.Thread):
         # o busy-wait segura a GIL; encurtar o switch interval mantém a UI e o
         # atalho global respondendo enquanto clicamos em alta frequência
         sys.setswitchinterval(0.002)
-        write, fd, pkt = os.write, self.mouse.fd, self.packet
+        write, fd = os.write, self.mouse.fd
         clock, stop = time.perf_counter, self._stop
-        interval, spin = self.interval, self.spin
+        interval, hold = self.interval, self.hold
         nxt = clock()
         while not stop.is_set():
-            write(fd, pkt)
+            write(fd, self.press)
+            self._until(nxt + hold)
+            write(fd, self.release)
             self.count += 1
             if self.limit and self.count >= self.limit:
                 break
             nxt += interval
-            rest = nxt - clock() - spin
-            if rest > 0:
-                stop.wait(rest)
-            while clock() < nxt:  # busy-wait final: precisão sub-ms
-                pass
+            self._until(nxt)
             if clock() - nxt > 0.05:  # atrasou demais (suspensão, carga): ressincroniza
                 nxt = clock()
 
@@ -714,6 +746,365 @@ class Beeper:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+# -------------------------------------- injeção direcionada a uma janela ----
+class XKeyEvent(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                ("window", ctypes.c_ulong), ("root", ctypes.c_ulong),
+                ("subwindow", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                ("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("x_root", ctypes.c_int), ("y_root", ctypes.c_int),
+                ("state", ctypes.c_uint), ("keycode", ctypes.c_uint),
+                ("same_screen", ctypes.c_int)]
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [("type", ctypes.c_int), ("xkey", XKeyEvent),
+                ("pad", ctypes.c_long * 24)]
+
+
+class XClassHint(ctypes.Structure):
+    # c_void_p e não c_char_p: com c_char_p o ctypes entrega bytes já copiados e
+    # o XFree acabaria liberando o ponteiro errado, corrompendo o heap
+    _fields_ = [("res_name", ctypes.c_void_p), ("res_class", ctypes.c_void_p)]
+
+
+
+# No Wayland não existe "entregar este evento naquela janela": o input pertence
+# ao seat e vai para quem está em foco — nem o fake_input do KWin, único
+# protocolo de injeção que ele implementa, tem argumento de surface.
+#
+# O caminho que funciona é outro: teclado segue o foco. Damos foco à janela
+# alvo por um instante, mandamos a tecla pelo nosso teclado uinput (evento de
+# kernel, que app nenhum pode ignorar, ao contrário de XSendEvent sintético) e
+# devolvemos o foco. Medido: 12 ms para ativar, 12 ms para devolver, a tecla
+# cai na alvo e zero vaza para a janela que o usuário estava usando.
+#
+# Só vale para teclado. Clique segue o cursor, não o foco, então exigiria
+# teleportar o ponteiro do usuário — aí sim atrapalharia.
+KWIN_LIST_JS = """
+var out = [];
+var ws = workspace.windowList ? workspace.windowList() : workspace.clientList();
+for (var i = 0; i < ws.length; i++) {
+  var w = ws[i];
+  if (!w.normalWindow || w.skipTaskbar) continue;
+  out.push({id: String(w.internalId), cls: String(w.resourceClass),
+            pid: w.pid, title: String(w.caption), active: w.active === true});
+}
+callDBus("%(svc)s", "%(path)s", "%(iface)s", "reply", JSON.stringify(out));
+"""
+
+KWIN_ACTIVATE_JS = """
+var ws = workspace.windowList ? workspace.windowList() : workspace.clientList();
+var prev = "";
+for (var i = 0; i < ws.length; i++) if (ws[i].active) prev = String(ws[i].internalId);
+for (var i = 0; i < ws.length; i++) {
+  if (String(ws[i].internalId) === "%(target)s") workspace.activeWindow = ws[i];
+}
+callDBus("%(svc)s", "%(path)s", "%(iface)s", "reply", prev);
+"""
+
+
+class XInject:
+    """Injeção de tecla numa janela X11 específica, via XSendEvent.
+
+    Este é o único caminho que entrega input a uma janela sem mexer no foco do
+    usuário: o X11 endereça o evento à janela, e o cliente processa mesmo sem
+    foco e mesmo minimizado — medido, 3 de 3 nas duas situações. É o oposto do
+    Wayland, onde o evento vai para quem tem foco e ponto.
+
+    Vale só para clientes X11 (sob Xwayland). App Wayland nativo não tem window
+    id para endereçar. E o evento vai marcado como sintético, então app que só
+    aceita input "de verdade" pode ignorar — por isso a UI testa antes.
+    """
+    KEYPRESS, KEYRELEASE = 2, 3
+    PRESS_MASK, RELEASE_MASK = 1 << 0, 1 << 1
+
+    def __init__(self):
+        self.ok = False
+        self.error = None
+        self.dpy = None
+        if not os.environ.get("DISPLAY"):
+            self.error = "no X11 display (Xwayland not running)"
+            return
+        try:
+            import ctypes.util
+            lib = ctypes.util.find_library("X11")
+            self.x = ctypes.CDLL(lib) if lib else None
+        except OSError:
+            self.x = None
+        if not self.x:
+            self.error = "libX11 not found"
+            return
+        self._declare()
+        self.dpy = self.x.XOpenDisplay(None)
+        if not self.dpy:
+            self.error = "could not open the X11 display"
+            return
+        self.root = self.x.XDefaultRootWindow(self.dpy)
+        self.ok = True
+
+    def _declare(self):
+        """ctypes sem argtypes trunca ponteiro para int e derruba o processo."""
+        x, D, W = self.x, ctypes.c_void_p, ctypes.c_ulong
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]; x.XOpenDisplay.restype = D
+        x.XDefaultRootWindow.argtypes = [D]; x.XDefaultRootWindow.restype = W
+        x.XInternAtom.argtypes = [D, ctypes.c_char_p, ctypes.c_int]
+        x.XInternAtom.restype = W
+        x.XGetWindowProperty.argtypes = [
+            D, W, W, ctypes.c_long, ctypes.c_long, ctypes.c_int, W,
+            ctypes.POINTER(W), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+        x.XGetWindowProperty.restype = ctypes.c_int
+        x.XFree.argtypes = [ctypes.c_void_p]
+        x.XStringToKeysym.argtypes = [ctypes.c_char_p]
+        x.XStringToKeysym.restype = W
+        x.XKeysymToKeycode.argtypes = [D, W]
+        x.XKeysymToKeycode.restype = ctypes.c_ubyte
+        x.XSendEvent.argtypes = [D, W, ctypes.c_int, ctypes.c_long,
+                                 ctypes.POINTER(XEvent)]
+        x.XSendEvent.restype = ctypes.c_int
+        x.XFlush.argtypes = [D]; x.XFlush.restype = ctypes.c_int
+        x.XGetClassHint.argtypes = [D, W, ctypes.POINTER(XClassHint)]
+        x.XGetClassHint.restype = ctypes.c_int
+
+    def _prop(self, win, name, prop_type):
+        actual_type = ctypes.c_ulong()
+        actual_fmt = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        after = ctypes.c_ulong()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        atom = self.x.XInternAtom(self.dpy, name.encode(), 0)
+        r = self.x.XGetWindowProperty(
+            self.dpy, win, atom, 0, 1024, 0, prop_type,
+            ctypes.byref(actual_type), ctypes.byref(actual_fmt),
+            ctypes.byref(nitems), ctypes.byref(after), ctypes.byref(data))
+        if r != 0 or not data:
+            return None, 0
+        return data, nitems.value
+
+    def windows(self):
+        """[(xid, pid, classe)] das janelas X11 gerenciadas agora."""
+        out = []
+        data, n = self._prop(self.root, "_NET_CLIENT_LIST", 33)   # XA_WINDOW
+        if not data:
+            return out
+        ids = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
+        wins = [ids[i] for i in range(n)]
+        self.x.XFree(data)
+        for w in wins:
+            pid = 0
+            d, cnt = self._prop(w, "_NET_WM_PID", 6)              # XA_CARDINAL
+            if d and cnt:
+                pid = ctypes.cast(d, ctypes.POINTER(ctypes.c_ulong))[0]
+                self.x.XFree(d)
+            hint = XClassHint()
+            cls = ""
+            if self.x.XGetClassHint(self.dpy, w, ctypes.byref(hint)):
+                if hint.res_class:
+                    cls = ctypes.string_at(hint.res_class).decode(errors="replace")
+                    self.x.XFree(hint.res_class)
+                if hint.res_name:
+                    self.x.XFree(hint.res_name)
+            out.append((w, int(pid), cls))
+        return out
+
+    def send_key(self, win, keysym_name, hold=0.05):
+        """press + release endereçados à janela. O hold importa: sem ele, quem
+        consulta estado por quadro não vê nada."""
+        if not self.ok:
+            return False
+        ks = self.x.XStringToKeysym(keysym_name.encode())
+        if not ks:
+            return False
+        kc = self.x.XKeysymToKeycode(self.dpy, ks)
+        for etype, mask in ((self.KEYPRESS, self.PRESS_MASK),
+                            (self.KEYRELEASE, self.RELEASE_MASK)):
+            ev = XEvent()
+            ev.type = etype
+            k = ev.xkey
+            k.type, k.display, k.window, k.root = etype, self.dpy, win, self.root
+            k.subwindow, k.time = 0, 0
+            k.x = k.y = k.x_root = k.y_root = 1
+            k.state, k.keycode, k.same_screen = 0, kc, 1
+            self.x.XSendEvent(self.dpy, win, 1, mask, ctypes.byref(ev))
+            self.x.XFlush(self.dpy)
+            if etype == self.KEYPRESS:
+                time.sleep(hold)
+        return True
+
+
+# nomes de keysym do X para as teclas que a macro oferece
+X_KEYSYM = {"Space": "space", "Enter": "Return", "Tab": "Tab", "Esc": "Escape",
+            "Backspace": "BackSpace", "Delete": "Delete", "Insert": "Insert",
+            "Home": "Home", "End": "End", "Page Up": "Prior",
+            "Page Down": "Next", "Up": "Up", "Down": "Down", "Left": "Left",
+            "Right": "Right", "Left Shift": "Shift_L",
+            "Right Shift": "Shift_R", "Left Ctrl": "Control_L",
+            "Right Ctrl": "Control_R", "Left Alt": "Alt_L",
+            "Right Alt": "Alt_R", "Left Super": "Super_L",
+            "Right Super": "Super_R"}
+
+
+def x_keysym(name):
+    """Nome da tecla na UI -> keysym do X."""
+    if name in X_KEYSYM:
+        return X_KEYSYM[name]
+    if len(name) == 1:
+        return name.lower() if name.isalpha() else name
+    if name.startswith("F") and name[1:].isdigit():
+        return name
+    if name.startswith("Numpad "):
+        tail = name.split(" ", 1)[1]
+        return {"+": "KP_Add", "-": "KP_Subtract", "*": "KP_Multiply",
+                "/": "KP_Divide", ".": "KP_Decimal",
+                "Enter": "KP_Enter"}.get(tail, "KP_" + tail)
+    return None
+
+
+class KWinBridge(QObject):
+    """Conversa com o KWin via scripting: só ele enxerga as janelas no Wayland.
+
+    O script JS roda dentro do compositor e devolve o resultado chamando um
+    serviço D-Bus nosso — scripts do KWin podem fazer callDBus, mas não podem
+    escrever em arquivo nem receber chamadas.
+    """
+    IFACE = "org.wayclick.Bridge"
+
+    def __init__(self):
+        super().__init__()
+        self.ok = False
+        self.error = None
+        self._reply = None
+        try:
+            from PySide6.QtDBus import QDBusConnection
+        except ImportError:
+            self.error = "PySide6.QtDBus not available"
+            return
+        self.service = f"org.wayclick.Bridge{os.getpid()}"
+        self.path = "/bridge"
+        bus = QDBusConnection.sessionBus()
+        if not (bus.registerService(self.service)
+                and bus.registerObject(self.path, self.IFACE, self,
+                                       QDBusConnection.ExportAllSlots)):
+            self.error = "could not register the D-Bus service"
+            return
+        self.script = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+            f"wayclick-kwin-{os.getpid()}.js")
+        self.ok = True
+
+    @Slot(str)
+    def reply(self, payload):
+        self._reply = payload
+
+    def _run(self, js, timeout=2.0):
+        if not self.ok:
+            return None
+        self._reply = None
+        try:
+            with open(self.script, "w") as fh:
+                fh.write(js % {"svc": self.service, "path": self.path,
+                               "iface": self.IFACE, "target": self._target})
+        except OSError:
+            return None
+        run = lambda *a: subprocess.run(a, capture_output=True, text=True)
+        run("gdbus", "call", "--session", "-d", "org.kde.KWin", "-o",
+            "/Scripting", "-m", "org.kde.kwin.Scripting.unloadScript", "wayclick")
+        r = run("gdbus", "call", "--session", "-d", "org.kde.KWin", "-o",
+                "/Scripting", "-m", "org.kde.kwin.Scripting.loadScript",
+                self.script, "wayclick")
+        sid = "".join(c for c in r.stdout if c.isdigit())
+        if not sid:
+            self.error = "KWin refused the script (is this KWin?)"
+            return None
+        run("gdbus", "call", "--session", "-d", "org.kde.KWin", "-o",
+            f"/Scripting/Script{sid}", "-m", "org.kde.kwin.Script.run")
+        deadline = time.perf_counter() + timeout
+        app = QApplication.instance()
+        while self._reply is None and time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.004)
+        return self._reply
+
+    _target = ""
+
+    def windows(self):
+        self._target = ""
+        raw = self._run(KWIN_LIST_JS)
+        try:
+            return json.loads(raw) if raw else []
+        except ValueError:
+            return []
+
+    def activate(self, internal_id):
+        """Ativa a janela e devolve quem estava ativa antes."""
+        self._target = internal_id
+        return self._run(KWIN_ACTIVATE_JS)
+
+    def cleanup(self):
+        try:
+            os.remove(self.script)
+        except (OSError, AttributeError):
+            pass
+
+
+_ICON_CACHE = {}
+
+
+def app_icon(resource_class):
+    """Ícone do app a partir da classe da janela, via arquivos .desktop."""
+    if resource_class in _ICON_CACHE:
+        return _ICON_CACHE[resource_class]
+    name = None
+    dirs = [os.path.join(d, "applications") for d in
+            [os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")]
+            + (os.environ.get("XDG_DATA_DIRS") or "/usr/share").split(":")]
+    wanted = resource_class.lower()
+    for d in dirs:
+        for cand in (f"{resource_class}.desktop", f"{wanted}.desktop"):
+            path = os.path.join(d, cand)
+            if os.path.exists(path):
+                name = _desktop_icon(path)
+                break
+        if name:
+            break
+    if not name:                       # último recurso: casar por StartupWMClass
+        for d in dirs:
+            for f in glob.glob(os.path.join(d, "*.desktop")):
+                if _desktop_wmclass(f) == wanted:
+                    name = _desktop_icon(f)
+                    break
+            if name:
+                break
+    icon = QIcon.fromTheme(name or resource_class)
+    if icon.isNull():
+        icon = QIcon.fromTheme("application-x-executable")
+    _ICON_CACHE[resource_class] = icon
+    return icon
+
+
+def _desktop_field(path, key):
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                if line.startswith(key + "="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _desktop_icon(path):
+    return _desktop_field(path, "Icon")
+
+
+def _desktop_wmclass(path):
+    v = _desktop_field(path, "StartupWMClass")
+    return v.lower() if v else None
+
+
 # ------------------------------------------------------------- idioma ------
 # Dicionário simples em vez de .ts/.qm: o app é um arquivo só, e assim quem for
 # traduzir para outro idioma só precisa copiar um bloco aqui.
@@ -728,6 +1119,25 @@ TRANSLATIONS = {
         "Show window": "Mostrar janela", "Hide window": "Esconder janela",
         "Quit": "Sair", "About": "Sobre",
         "Project on GitHub": "Projeto no GitHub",
+        "Send key to a window": "Mandar tecla para uma janela",
+        "Window:": "Janela:", "Every:": "A cada:",
+        "no window found": "nenhuma janela encontrada",
+        "Targeted key unavailable: {msg}": "Tecla direcionada indisponível: {msg}",
+        "Lost the target window.": "Perdi a janela alvo.",
+        "Pick a window first (↻ to rescan).":
+            "Escolha uma janela primeiro (↻ para reprocurar).",
+        "That key has no X11 equivalent.": "Essa tecla não tem equivalente no X11.",
+        "⚠ Pure Wayland: reachable only by stealing focus for an instant. "
+        "Reopen this program in X11 mode and it takes the key directly, even "
+        "minimized — SDL_VIDEODRIVER=x11, GDK_BACKEND=x11 or "
+        "QT_QPA_PLATFORM=xcb.":
+            "⚠ Wayland puro: só dá para alcançar roubando o foco por um "
+            "instante. Reabra este programa em modo X11 e ele recebe a tecla "
+            "direto, mesmo minimizado — SDL_VIDEODRIVER=x11, GDK_BACKEND=x11 "
+            "ou QT_QPA_PLATFORM=xcb.",
+        "Nothing to run: enable Click, Keyboard macro or Send key to a window.":
+            "Nada para executar: habilite Clique, Macro de teclado ou Mandar "
+            "tecla para uma janela.",
         "Click": "Clique", "Keyboard macro": "Macro de teclado",
         "Trigger": "Acionamento",
         "Mouse:": "Mouse:", "Interval:": "Intervalo:", "Button:": "Botão:",
@@ -753,8 +1163,6 @@ TRANSLATIONS = {
         "held": "segurada", "nothing enabled": "nada habilitado",
         "stops in {n}s": "para em {n}s", "anti-AFK": "anti-AFK",
         "clicks/s": "cliques/s",
-        "Nothing to run: enable Click, Keyboard macro, or both.":
-            "Nada para executar: habilite Clique, Macro de teclado, ou os dois.",
         "Move the cursor off this window before starting — otherwise it clicks "
         "itself. That is what the {d}s start delay is for. {hk} toggles; Esc stops.":
             "Tire o cursor desta janela antes de iniciar — senão ele clica em si "
@@ -1011,7 +1419,7 @@ class App(QWidget):
 
         # --- macro de teclado ---
         self.key_sel = QComboBox(); self.key_sel.addItems(KEYS.keys())
-        self.key_sel.setMaxVisibleItems(20)
+        self._scrollable(self.key_sel)
         self.key_sel.setCurrentText(cfg.get("key", "Space"))
         self.key_interval = QDoubleSpinBox()
         self.key_interval.setRange(1.0, 10000.0)
@@ -1058,6 +1466,46 @@ class App(QWidget):
         box = QGroupBox(_("Trigger")); box.setLayout(form)
         self.trigger_box = box
 
+        # --- injeção direcionada a uma janela (beta) ---
+        self.win_sel = QComboBox()
+        self.win_sel.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.win_sel.setMinimumContentsLength(22)
+        self._scrollable(self.win_sel)
+        self.win_refresh = QPushButton("↻")
+        self.win_refresh.setFixedWidth(30)
+        self.win_refresh.clicked.connect(self.refresh_windows)
+        win_row = QHBoxLayout()
+        win_row.addWidget(self.win_sel, 1)
+        win_row.addWidget(self.win_refresh)
+        self.win_key = QComboBox(); self.win_key.addItems(KEYS.keys())
+        self._scrollable(self.win_key)
+        self.win_key.setCurrentText(cfg.get("target_key", "Space"))
+        self.win_sel.currentIndexChanged.connect(self._update_win_warn)
+        self.win_secs = QSpinBox(); self.win_secs.setRange(1, 3600)
+        self.win_secs.setValue(cfg.get("target_seconds", 60))
+        self.win_secs.setSuffix(" s")
+        self.win_secs.valueChanged.connect(self._target_restart)
+
+        self.win_warn = QLabel("")
+        self.win_warn.setWordWrap(True)
+        self.win_warn.setStyleSheet("color:#d04030;font-size:11px;")
+        self.win_warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        target_form = QFormLayout()
+        self._row(target_form, "Window:", win_row)
+        self._row(target_form, "Key:", self.win_key)
+        self._row(target_form, "Every:", self.win_secs)
+        # o aviso fica fora do form: QLabel com quebra de linha dentro de
+        # QFormLayout não calcula a altura e sai cortado
+        target_col = QVBoxLayout()
+        target_col.addLayout(target_form)
+        target_col.addWidget(self.win_warn)
+        self.target_box = QGroupBox(_("Send key to a window"))
+        self.target_box.setCheckable(True)
+        self.target_box.setChecked(False)
+        self.target_box.setLayout(target_col)
+        self.target_box.toggled.connect(self._target_toggled)
+
         # --- anti-AFK (independente do Start) ---
         self.afk = QCheckBox(_("Anti-AFK: nudge the cursor every"))
         self.afk.setChecked(False)
@@ -1089,18 +1537,32 @@ class App(QWidget):
         checks.addWidget(self.autostart)
         checks.addStretch()
 
-        lay = QVBoxLayout(self)
-        lay.setMenuBar(self._build_menu())
+        lay = QVBoxLayout()
         lay.addWidget(self.tip)
         lay.addWidget(self.click_box)
         lay.addWidget(self.key_box)
         lay.addWidget(box)
+        lay.addWidget(self.target_box)
         lay.addLayout(afk_row)
         lay.addLayout(checks)
         lay.addWidget(self.status)
         lay.addWidget(self.btn)
         lay.addWidget(self.warn)
-        self.resize(430, 440)
+
+        # corpo rolável: em tela baixa o conteúdo não cabe todo e o layout
+        # começa a espremer as linhas dos grupos em vez de deixar rolar
+        body = QWidget()
+        body.setLayout(lay)
+        scroll = QScrollArea()
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setMenuBar(self._build_menu())
+        outer.addWidget(scroll)
+        self.resize(450, min(940, body.sizeHint().height() + 60))
         self.setWindowIcon(mouse_icon())
         self._show_rate()
         self._paint_status()
@@ -1130,6 +1592,12 @@ class App(QWidget):
 
         self.beeper = Beeper()
         self.holder = None      # MouseHold, só no modo "mouse_hold"
+        self.bridge = None      # KWinBridge, criado sob demanda
+        self.xinject = None     # XInject, para janelas X11
+        self.target_hits = 0
+        self.target_ms = 0.0
+        self.target_timer = QTimer(self)
+        self.target_timer.timeout.connect(self._target_tick)
         self._build_tray()
 
         # cria o mouse virtual já no início: o UI_DEV_CREATE precisa de ~0,4 s
@@ -1178,6 +1646,14 @@ class App(QWidget):
                 "Move the cursor off this window before starting — otherwise "
                 "it clicks itself. That is what the {d}s start delay is for. "
                 "{hk} toggles; Esc stops.", d=self.delay.value(), hk=hk))
+
+    @staticmethod
+    def _scrollable(combo, visible=5):
+        """Popup com no máximo `visible` itens e barra de rolagem. O
+        combobox-popup:0 é o que faz o Qt largar o popup nativo, que ignora
+        maxVisibleItems e abre uma lista do tamanho da tela."""
+        combo.setMaxVisibleItems(visible)
+        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
 
     # -------------------------------------------------------- menu/i18n --
     def _row(self, form, text, widget):
@@ -1276,6 +1752,8 @@ class App(QWidget):
         self.key_box.setTitle(_("Keyboard macro"))
         self.trigger_box.setTitle(_("Trigger"))
         self.afk.setText(_("Anti-AFK: nudge the cursor every"))
+        self.target_box.setTitle(_("Send key to a window"))
+        self._update_win_warn()
         self.sound.setText(_("Sound feedback on hotkey"))
         self.autostart.setText(_("Start with system"))
         self.refresh_btn.setToolTip(_("Rescan mice"))
@@ -1449,8 +1927,10 @@ class App(QWidget):
         if on:
             if not self.ensure_mouse():
                 return
-            if not (self.click_box.isChecked() or self.key_box.isChecked()):
-                self.warn.setText(_("Nothing to run: enable Click, Keyboard macro, or both."))
+            if not (self.click_box.isChecked() or self.key_box.isChecked()
+                    or self.target_box.isChecked()):
+                self.warn.setText(_("Nothing to run: enable Click, Keyboard "
+                                    "macro or Send key to a window."))
                 return
             self.running = True
             self.btn.setText(_("Stop"))
@@ -1522,8 +2002,9 @@ class App(QWidget):
             self._paint_status()
 
     def _start_clicking(self):
-        """Liga o que estiver habilitado: cliques, macro de teclado, ou os dois."""
-        if self.clicker or self.keymacro:
+        """Liga o que estiver habilitado: cliques, macro de teclado e/ou a
+        tecla direcionada a uma janela."""
+        if self.clicker or self.keymacro or self.target_timer.isActive():
             return
         if self.click_box.isChecked():
             self.clicker = Clicker(self.mouse, self.interval.value(),
@@ -1535,10 +2016,13 @@ class App(QWidget):
                                      self.key_mode.currentData() == "Hold")
             self.keymacro.start()
         self._state = "run"
+        if self.target_box.isChecked():
+            self._target_start()
         self._show_status()
         self._paint_status()
 
     def _stop_clicker(self):
+        self.target_timer.stop()
         if self.clicker:
             self.clicker.stop()
             self.clicker = None
@@ -1566,6 +2050,140 @@ class App(QWidget):
             if self.keyboard:
                 self.keyboard.close()
                 self.keyboard = None
+
+    # ------------------------------------------ janela alvo (beta) --------
+    def refresh_windows(self):
+        """Lista as janelas abertas, com ícone, mantendo a seleção se possível."""
+        if self.bridge is None:
+            self.bridge = KWinBridge()
+        keep = (self.win_sel.currentData() or {}).get("id")
+        self.win_sel.blockSignals(True)
+        self.win_sel.clear()
+        wins = self.bridge.windows() if self.bridge.ok else []
+        if self.xinject is None:
+            self.xinject = XInject()
+        xs = self.xinject.windows() if self.xinject.ok else []
+        by_pid = {pid: xid for xid, pid, _cls in xs if pid}
+        by_cls = {cls.lower(): xid for xid, _pid, cls in xs if cls}
+        for w in wins:
+            xid = by_pid.get(w["pid"]) or by_cls.get(w["cls"].lower())
+            w["xid"] = xid
+            mark = "⌨ " if xid else "◐ "     # injeção real x precisa de foco
+            label = f"{mark}{w['title'][:36]}  —  {w['cls']}"
+            self.win_sel.addItem(app_icon(w["cls"]), label,
+                                 {"id": w["id"], "xid": xid})
+        if not wins:
+            self.win_sel.addItem(_("no window found"), None)
+        idx = next((i for i in range(self.win_sel.count())
+                    if (self.win_sel.itemData(i) or {}).get("id") == keep), -1)
+        self.win_sel.setCurrentIndex(idx if idx >= 0 else 0)
+        self.win_sel.blockSignals(False)
+        self.win_sel.setEnabled(bool(wins))
+        self._update_win_warn()
+        if not self.bridge.ok:
+            self.warn.setText(_("Targeted key unavailable: {msg}",
+                                msg=self.bridge.error or "?"))
+        return wins
+
+    def _update_win_warn(self):
+        """Wayland puro não tem como receber tecla endereçada: avisa e ensina
+        a reabrir o programa como cliente X11, que aí entra na injeção real."""
+        if not hasattr(self, "win_warn"):
+            return
+        sel = self.win_sel.currentData() or {}
+        if not self.win_sel.isEnabled() or not sel or sel.get("xid"):
+            self._set_win_warn("")
+        else:
+            self._set_win_warn(_(
+                "⚠ Pure Wayland: reachable only by stealing focus for an "
+                "instant. Reopen this program in X11 mode and it takes the key "
+                "directly, even minimized — SDL_VIDEODRIVER=x11, "
+                "GDK_BACKEND=x11 or QT_QPA_PLATFORM=xcb."))
+
+    def _set_win_warn(self, text):
+        """Reserva a altura de verdade do texto: QLabel com quebra de linha
+        informa uma linha só como mínimo, e o layout espreme as linhas de cima."""
+        self.win_warn.setText(text)
+        if not text:
+            self.win_warn.setMinimumHeight(0)
+            return
+        width = max(self.win_warn.width(), 360)
+        rect = self.win_warn.fontMetrics().boundingRect(
+            0, 0, width, 0, Qt.TextWordWrap, text)
+        self.win_warn.setMinimumHeight(rect.height() + 6)
+
+    def _target_ready(self):
+        """Janela escolhida pronta. Só janela Wayland precisa do teclado
+        virtual: a X11 recebe a tecla endereçada, sem passar pelo seat."""
+        if not self.win_sel.count() or self.win_sel.currentData() is None:
+            self.refresh_windows()
+        sel = self.win_sel.currentData()
+        if not sel:
+            self.warn.setText(_("Pick a window first (↻ to rescan)."))
+            return False
+        if sel.get("xid"):
+            if not x_keysym(self.win_key.currentText()):
+                self.warn.setText(_("That key has no X11 equivalent."))
+                return False
+            return True
+        return self.ensure_keyboard()
+
+    def _target_start(self):
+        """Manda a tecla na hora e depois a cada N segundos — esperar o
+        intervalo inteiro para o primeiro envio parecia que não funcionava."""
+        if not self._target_ready():
+            return False
+        self._target_tick()
+        self.target_timer.start(self.win_secs.value() * 1000)
+        return True
+
+    def _target_toggled(self, on):
+        if not on:
+            self.target_timer.stop()
+        elif self.running and self._state == "run":
+            self._target_start()
+        else:
+            self.refresh_windows()
+            self.ensure_keyboard()   # 0,4 s de settle: paga agora, não no Start
+        self._show_status()
+
+    def _target_restart(self, _v=None):
+        if self.target_timer.isActive():
+            self.target_timer.start(self.win_secs.value() * 1000)
+
+    def _target_tick(self):
+        """Janela X11: injeta direto, sem tocar no foco nem precisar dela
+        visível. Janela Wayland: não há como endereçar, então cai no truque de
+        dar foco por um instante e devolver."""
+        sel = self.win_sel.currentData() or {}
+        wid, xid = sel.get("id"), sel.get("xid")
+        if not wid:
+            return
+        if xid:
+            keysym = x_keysym(self.win_key.currentText())
+            if keysym and self.xinject and self.xinject.ok:
+                t0 = time.perf_counter()
+                if self.xinject.send_key(xid, keysym):
+                    self.target_hits += 1
+                    self.target_ms = (time.perf_counter() - t0) * 1000
+                    self._show_status()
+                    return
+        if not self.keyboard:
+            return
+        t0 = time.perf_counter()
+        prev = self.bridge.activate(wid)
+        if prev is None:
+            self.warn.setText(_("Lost the target window."))
+            self.target_box.setChecked(False)
+            return
+        # o hold do tap já é a folga para a tecla chegar antes de devolver foco
+        self.keyboard.tap(KEYS[self.win_key.currentText()])
+        self.target_hits += 1
+        if prev and prev != wid:
+            self.bridge.activate(prev)
+        # quanto tempo o foco do usuário ficou roubado neste ciclo
+        self.target_ms = (time.perf_counter() - t0) * 1000
+        self._show_status()
 
     # ---------------------------------------------------------- anti-afk --
     def _afk_toggled(self, on):
@@ -1602,6 +2220,10 @@ class App(QWidget):
             txt += "  —  " + _("stops in {n}s", n=self._remain)
         if self.antiafk:
             txt += "   ⟲ " + _("anti-AFK")
+        if self.target_timer.isActive():
+            txt += ("   ⌨ " + self.win_key.currentText()
+                    + f" ×{self.target_hits}"
+                    + (f" ({self.target_ms:.0f} ms)" if self.target_ms else ""))
         self.status.setText(txt)
 
     def _tick_autostop(self):
@@ -1639,6 +2261,9 @@ class App(QWidget):
         if self.antiafk:
             self.antiafk.stop()
             self.antiafk = None
+        self.target_timer.stop()
+        if self.bridge:
+            self.bridge.cleanup()
         self.watcher.stop()
         if self.keyboard:
             self.keyboard.close()
@@ -1662,6 +2287,8 @@ class App(QWidget):
                            "key_interval_ms": self.key_interval.value(),
                            "key_mode": self.key_mode.currentData(),
                            "afk_seconds": self.afk_secs.value(),
+                           "target_key": self.win_key.currentText(),
+                           "target_seconds": self.win_secs.value(),
                            "theme": self.theme,
                            "language": LANG}, fh)
         except Exception:
