@@ -912,6 +912,11 @@ TRANSLATIONS = {
         "no window found": "nenhuma janela encontrada",
         "Targeted key unavailable: {msg}": "Tecla direcionada indisponível: {msg}",
         "Lost the target window.": "Perdi a janela alvo.",
+        "Pick a window first (↻ to rescan).":
+            "Escolha uma janela primeiro (↻ para reprocurar).",
+        "Nothing to run: enable Click, Keyboard macro or Send key to a window.":
+            "Nada para executar: habilite Clique, Macro de teclado ou Mandar "
+            "tecla para uma janela.",
         "Click": "Clique", "Keyboard macro": "Macro de teclado",
         "Trigger": "Acionamento",
         "Mouse:": "Mouse:", "Interval:": "Intervalo:", "Button:": "Botão:",
@@ -937,8 +942,6 @@ TRANSLATIONS = {
         "held": "segurada", "nothing enabled": "nada habilitado",
         "stops in {n}s": "para em {n}s", "anti-AFK": "anti-AFK",
         "clicks/s": "cliques/s",
-        "Nothing to run: enable Click, Keyboard macro, or both.":
-            "Nada para executar: habilite Clique, Macro de teclado, ou os dois.",
         "Move the cursor off this window before starting — otherwise it clicks "
         "itself. That is what the {d}s start delay is for. {hk} toggles; Esc stops.":
             "Tire o cursor desta janela antes de iniciar — senão ele clica em si "
@@ -1668,8 +1671,10 @@ class App(QWidget):
         if on:
             if not self.ensure_mouse():
                 return
-            if not (self.click_box.isChecked() or self.key_box.isChecked()):
-                self.warn.setText(_("Nothing to run: enable Click, Keyboard macro, or both."))
+            if not (self.click_box.isChecked() or self.key_box.isChecked()
+                    or self.target_box.isChecked()):
+                self.warn.setText(_("Nothing to run: enable Click, Keyboard "
+                                    "macro or Send key to a window."))
                 return
             self.running = True
             self.btn.setText(_("Stop"))
@@ -1741,8 +1746,9 @@ class App(QWidget):
             self._paint_status()
 
     def _start_clicking(self):
-        """Liga o que estiver habilitado: cliques, macro de teclado, ou os dois."""
-        if self.clicker or self.keymacro:
+        """Liga o que estiver habilitado: cliques, macro de teclado e/ou a
+        tecla direcionada a uma janela."""
+        if self.clicker or self.keymacro or self.target_timer.isActive():
             return
         if self.click_box.isChecked():
             self.clicker = Clicker(self.mouse, self.interval.value(),
@@ -1754,10 +1760,13 @@ class App(QWidget):
                                      self.key_mode.currentData() == "Hold")
             self.keymacro.start()
         self._state = "run"
+        if self.target_box.isChecked():
+            self._target_start()
         self._show_status()
         self._paint_status()
 
     def _stop_clicker(self):
+        self.target_timer.stop()
         if self.clicker:
             self.clicker.stop()
             self.clicker = None
@@ -1809,24 +1818,36 @@ class App(QWidget):
                                 msg=self.bridge.error or "?"))
         return wins
 
-    def _target_toggled(self, on):
-        self.target_timer.stop()
-        if not on:
-            self._show_status()
-            return
+    def _target_ready(self):
+        """Janela escolhida e teclado virtual prontos."""
         if not self.win_sel.count() or self.win_sel.currentData() is None:
             self.refresh_windows()
         if self.win_sel.currentData() is None:
-            self.target_box.setChecked(False)
-            return
-        if not self.ensure_keyboard():
-            self.target_box.setChecked(False)
-            return
+            self.warn.setText(_("Pick a window first (↻ to rescan)."))
+            return False
+        return self.ensure_keyboard()
+
+    def _target_start(self):
+        """Manda a tecla na hora e depois a cada N segundos — esperar o
+        intervalo inteiro para o primeiro envio parecia que não funcionava."""
+        if not self._target_ready():
+            return False
+        self._target_tick()
         self.target_timer.start(self.win_secs.value() * 1000)
+        return True
+
+    def _target_toggled(self, on):
+        if not on:
+            self.target_timer.stop()
+        elif self.running and self._state == "run":
+            self._target_start()
+        else:
+            self.refresh_windows()
+            self.ensure_keyboard()   # 0,4 s de settle: paga agora, não no Start
         self._show_status()
 
     def _target_restart(self, _v=None):
-        if self.target_box.isChecked():
+        if self.target_timer.isActive():
             self.target_timer.start(self.win_secs.value() * 1000)
 
     def _target_tick(self):
@@ -1884,7 +1905,7 @@ class App(QWidget):
             txt += "  —  " + _("stops in {n}s", n=self._remain)
         if self.antiafk:
             txt += "   ⟲ " + _("anti-AFK")
-        if self.target_box.isChecked():
+        if self.target_timer.isActive():
             txt += ("   ⌨ " + self.win_key.currentText()
                     + f" ×{self.target_hits}"
                     + (f" ({self.target_ms:.0f} ms)" if self.target_ms else ""))
