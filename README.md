@@ -18,7 +18,7 @@ running as root.
   delivery on the receiving window
 - **Global hotkey** that works even when the window is not focused
 - **Hold mode** — clicks only while you physically hold the mouse button
-- **Keyboard macro** — 122 keys, repeat or hold
+- **Keyboard macro** — any key, captured the way shortcuts are set; repeat or hold
 - **Send key to a window** — pick an open window and feed it a key; for X11
   targets it arrives with no focus change, even minimized
 - **Anti-AFK** — nudges the pointer and puts it back, with zero drift
@@ -137,11 +137,12 @@ clicks/s equivalent shown below it. Lower is faster.
 ### Keyboard macro
 
 Presses a key through a second virtual device, a real keyboard as far as the
-kernel is concerned. Pick the **key** — 122 of them: the whole alphabet and
-digits, F1–F24, the numpad, arrows, both sides of every modifier, punctuation
-and media keys — and choose the **action**: `Repeat` taps it at the interval you
-set, `Hold` presses it once and keeps it down. The key is always released on
-stop, on quit, and if the process dies — it never stays stuck.
+kernel is concerned. To choose the **key** you click the field and press the
+key you want, the way you would set a shortcut — no list to hunt through, and
+any key on your keyboard works. Then pick the **action**: `Repeat` taps it at
+the interval you set, `Hold` presses it once and keeps it down. The key is
+always released on stop, on quit, and if the process dies — it never stays
+stuck.
 
 One thing to expect in `Hold`: holding a normal key makes the system's own key
 repeat kick in, exactly as if you held it on your keyboard. Modifiers (Shift,
@@ -172,7 +173,7 @@ know the hotkey registered without looking.
 Pick one of your open windows and WayClick feeds it a key on an interval —
 Space into a game every 60 s, for instance, while you keep working. The list
 shows every open window with its real icon and a marker for how the key will
-get there:
+get there, and the key is set by pressing it, same as in the macro:
 
 | | |
 |---|---|

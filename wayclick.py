@@ -24,7 +24,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----

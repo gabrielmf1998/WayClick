@@ -18,7 +18,7 @@ compositor e sem nada rodando como root.
   de entrega na janela que recebe
 - **Atalho global** que funciona mesmo com a janela fora de foco
 - **Modo segurar** — só clica enquanto você segura o botão do mouse
-- **Macro de teclado** — 122 teclas, repetindo ou segurando
+- **Macro de teclado** — qualquer tecla, capturada como se define um atalho; repetindo ou segurando
 - **Mandar tecla para uma janela** — escolha uma janela aberta e alimente ela
   com uma tecla; em alvo X11 chega sem mexer no foco, mesmo minimizada
 - **Anti-AFK** — mexe o ponteiro e devolve, com deriva zero
@@ -140,11 +140,11 @@ cliques/s logo abaixo. Menor é mais rápido.
 ### Macro de teclado
 
 Aperta uma tecla por um segundo device virtual, um teclado de verdade do ponto
-de vista do kernel. Escolha a **tecla** — são 122: alfabeto e dígitos, F1–F24,
-teclado numérico, setas, os dois lados de cada modificador, pontuação e teclas
-de mídia — e a **ação**: `Repetir` bate no intervalo definido, `Segurar` aperta
-uma vez e mantém pressionada. A tecla é sempre solta ao parar, ao sair e mesmo
-se o processo morrer — nunca fica presa.
+de vista do kernel. Para escolher a **tecla** você clica no campo e aperta a
+tecla que quiser, do jeito que se define um atalho — sem lista para caçar, e
+qualquer tecla do teclado serve. Depois escolha a **ação**: `Repetir` bate no
+intervalo definido, `Segurar` aperta uma vez e mantém pressionada. A tecla é
+sempre solta ao parar, ao sair e mesmo se o processo morrer — nunca fica presa.
 
 Uma coisa esperada no `Segurar`: manter uma tecla normal pressionada aciona a
 repetição automática do próprio sistema, igualzinho a segurar no teclado.
@@ -176,7 +176,8 @@ que o atalho pegou sem precisar olhar.
 Escolha uma das suas janelas abertas e o WayClick alimenta ela com uma tecla no
 intervalo definido — espaço num jogo a cada 60 s, por exemplo, enquanto você
 continua trabalhando. A lista mostra cada janela aberta com o ícone real do
-programa e uma marca de como a tecla vai chegar:
+programa e uma marca de como a tecla vai chegar; a tecla se define apertando
+ela, igual na macro:
 
 | | |
 |---|---|
