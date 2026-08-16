@@ -152,11 +152,16 @@ class VirtualMouse:
         return uinput_node(self.fd)
 
     @staticmethod
+    def edge(code, value):
+        """Um flanco do botão (press ou release) + SYN, em um write só."""
+        return (struct.pack(EVENT_FMT, 0, 0, EV_KEY, code, value)
+                + struct.pack(EVENT_FMT, 0, 0, EV_SYN, SYN_REPORT, 0))
+
+    @staticmethod
     def packet(code):
-        """press + SYN + release + SYN em um único write (4x mais barato)."""
-        ev = lambda t, c, v: struct.pack(EVENT_FMT, 0, 0, t, c, v)
-        return (ev(EV_KEY, code, 1) + ev(EV_SYN, SYN_REPORT, 0)
-                + ev(EV_KEY, code, 0) + ev(EV_SYN, SYN_REPORT, 0))
+        """press + release colados. Serve para quem escuta evento, mas some
+        para quem consulta estado — ver o comentário em HOLD_S."""
+        return VirtualMouse.edge(code, 1) + VirtualMouse.edge(code, 0)
 
     def _emit(self, etype, code, value):
         os.write(self.fd, struct.pack(EVENT_FMT, 0, 0, etype, code, value))
@@ -239,8 +244,12 @@ class VirtualKeyboard:
         return (struct.pack(EVENT_FMT, 0, 0, EV_KEY, code, value)
                 + struct.pack(EVENT_FMT, 0, 0, EV_SYN, SYN_REPORT, 0))
 
-    def tap(self, code):
-        os.write(self.fd, self.packet(code, 1) + self.packet(code, 0))
+    def tap(self, code, hold=0.04):
+        """Aperta, segura e solta. O hold não é enfeite: com press e release
+        colados a tecla não existe para quem consulta estado por quadro."""
+        os.write(self.fd, self.packet(code, 1))
+        time.sleep(hold)
+        os.write(self.fd, self.packet(code, 0))
 
     def set(self, code, down):
         os.write(self.fd, self.packet(code, 1 if down else 0))
@@ -305,10 +314,13 @@ class AntiAfk(threading.Thread):
 class KeyMacro(threading.Thread):
     """Repete uma tecla no intervalo dado, ou a mantém pressionada."""
 
+    HOLD_S = 0.04
+
     def __init__(self, kb, interval_ms, keycode, hold=False):
         super().__init__(daemon=True)
         self.kb, self.code, self.hold = kb, keycode, hold
         self.interval = max(interval_ms, 1) / 1000.0
+        self.press_time = min(self.HOLD_S, self.interval * 0.5)
         self._stop = threading.Event()
         self.count = 0
 
@@ -320,7 +332,9 @@ class KeyMacro(threading.Thread):
             else:
                 nxt = time.perf_counter()
                 while not self._stop.is_set():
-                    self.kb.tap(self.code)
+                    self.kb.set(self.code, True)
+                    self._stop.wait(self.press_time)
+                    self.kb.set(self.code, False)
                     self.count += 1
                     nxt += self.interval
                     rest = nxt - time.perf_counter()
@@ -349,6 +363,7 @@ class Clicker(threading.Thread):
     busy-wait — é o que permite chegar em 0,1 ms (10.000 cliques/s).
     """
     SPIN_S = 0.0006  # busy-wait nos últimos 600 us
+    HOLD_S = 0.04    # ver abaixo
 
     def __init__(self, mouse, interval_ms, button, limit=0):
         super().__init__(daemon=True)
@@ -356,9 +371,25 @@ class Clicker(threading.Thread):
         self.interval = max(interval_ms, 0.1) / 1000.0
         # busy-wait curto: só o suficiente pra cobrir a granularidade do sleep
         self.spin = min(self.SPIN_S, self.interval * 0.3)
-        self.packet = VirtualMouse.packet(button)
+        # O botão precisa ficar baixo por um tempo real. Jogo não escuta evento,
+        # ele pergunta "o botão está apertado?" a cada quadro; com press e
+        # release colados, medimos 0 de 126 quadros pegando o botão baixo — o
+        # clique simplesmente não existia para ele. Metade do intervalo, no
+        # máximo 40 ms: a 100 ms dá 40 ms (uns 2,7 quadros a 60 fps) e a 0,1 ms
+        # dá 50 us, preservando os 10.000 cliques/s.
+        self.hold = min(self.HOLD_S, self.interval * 0.5)
+        self.press = VirtualMouse.edge(button, 1)
+        self.release = VirtualMouse.edge(button, 0)
         self._stop = threading.Event()
         self.count = 0
+
+    def _until(self, deadline):
+        """Dorme o grosso e queima o resto em busy-wait."""
+        rest = deadline - time.perf_counter() - self.spin
+        if rest > 0:
+            self._stop.wait(rest)
+        while time.perf_counter() < deadline:
+            pass
 
     def run(self):
         try:  # ajuda a estabilizar o jitter; falha silenciosa sem privilégio
@@ -368,21 +399,19 @@ class Clicker(threading.Thread):
         # o busy-wait segura a GIL; encurtar o switch interval mantém a UI e o
         # atalho global respondendo enquanto clicamos em alta frequência
         sys.setswitchinterval(0.002)
-        write, fd, pkt = os.write, self.mouse.fd, self.packet
+        write, fd = os.write, self.mouse.fd
         clock, stop = time.perf_counter, self._stop
-        interval, spin = self.interval, self.spin
+        interval, hold = self.interval, self.hold
         nxt = clock()
         while not stop.is_set():
-            write(fd, pkt)
+            write(fd, self.press)
+            self._until(nxt + hold)
+            write(fd, self.release)
             self.count += 1
             if self.limit and self.count >= self.limit:
                 break
             nxt += interval
-            rest = nxt - clock() - spin
-            if rest > 0:
-                stop.wait(rest)
-            while clock() < nxt:  # busy-wait final: precisão sub-ms
-                pass
+            self._until(nxt)
             if clock() - nxt > 0.05:  # atrasou demais (suspensão, carga): ressincroniza
                 nxt = clock()
 
@@ -1861,10 +1890,10 @@ class App(QWidget):
             self.warn.setText(_("Lost the target window."))
             self.target_box.setChecked(False)
             return
+        # o hold do tap já é a folga para a tecla chegar antes de devolver foco
         self.keyboard.tap(KEYS[self.win_key.currentText()])
         self.target_hits += 1
         if prev and prev != wid:
-            time.sleep(0.02)          # deixa a tecla chegar antes de devolver
             self.bridge.activate(prev)
         # quanto tempo o foco do usuário ficou roubado neste ciclo
         self.target_ms = (time.perf_counter() - t0) * 1000
