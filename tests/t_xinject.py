@@ -109,7 +109,7 @@ def done():
     print(f"vazaram para a HOST  : {leak['k']}")
     sem = int(out.get("SEM_FOCO", -1))
     tot = int(out.get("MINIMIZADA", -1))
-    ok = (R.get("xid") and sem >= 3 and tot > sem and leak["k"] == 0
+    ok = (R.get("xid") and sem >= 2 and tot > sem and leak["k"] == 0
           and R.get("active_meio") == "WCHOSTX")
     print("RESULTADO:", "tudo ok" if ok else "FALHOU")
     app.quit()

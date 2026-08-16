@@ -13,8 +13,9 @@ try:
     from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                    QFormLayout, QDoubleSpinBox, QGroupBox,
                                    QHBoxLayout, QLabel, QMenu, QMenuBar,
-                                   QMessageBox, QPushButton, QSpinBox,
-                                   QSystemTrayIcon, QVBoxLayout, QWidget)
+                                   QMessageBox, QPushButton, QScrollArea,
+                                   QSpinBox, QSystemTrayIcon, QVBoxLayout,
+                                   QWidget, QFrame)
 except ImportError:
     sys.exit("PySide6 is required.\n"
              "  Fedora/RHEL:   sudo dnf install python3-pyside6\n"
@@ -23,7 +24,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----
@@ -1118,7 +1119,7 @@ TRANSLATIONS = {
         "Show window": "Mostrar janela", "Hide window": "Esconder janela",
         "Quit": "Sair", "About": "Sobre",
         "Project on GitHub": "Projeto no GitHub",
-        "Send key to a window (beta)": "Mandar tecla para uma janela (beta)",
+        "Send key to a window": "Mandar tecla para uma janela",
         "Window:": "Janela:", "Every:": "A cada:",
         "no window found": "nenhuma janela encontrada",
         "Targeted key unavailable: {msg}": "Tecla direcionada indisponível: {msg}",
@@ -1126,11 +1127,14 @@ TRANSLATIONS = {
         "Pick a window first (↻ to rescan).":
             "Escolha uma janela primeiro (↻ para reprocurar).",
         "That key has no X11 equivalent.": "Essa tecla não tem equivalente no X11.",
-        "Wayland window: WayClick has to focus it for an instant to deliver the "
-        "key. X11 windows (⌨) take it directly, even minimized.":
-            "Janela Wayland: o WayClick precisa dar foco a ela por um instante "
-            "para entregar a tecla. Janela X11 (⌨) recebe direto, mesmo "
-            "minimizada.",
+        "⚠ Pure Wayland: reachable only by stealing focus for an instant. "
+        "Reopen this program in X11 mode and it takes the key directly, even "
+        "minimized — SDL_VIDEODRIVER=x11, GDK_BACKEND=x11 or "
+        "QT_QPA_PLATFORM=xcb.":
+            "⚠ Wayland puro: só dá para alcançar roubando o foco por um "
+            "instante. Reabra este programa em modo X11 e ele recebe a tecla "
+            "direto, mesmo minimizado — SDL_VIDEODRIVER=x11, GDK_BACKEND=x11 "
+            "ou QT_QPA_PLATFORM=xcb.",
         "Nothing to run: enable Click, Keyboard macro or Send key to a window.":
             "Nada para executar: habilite Clique, Macro de teclado ou Mandar "
             "tecla para uma janela.",
@@ -1415,7 +1419,7 @@ class App(QWidget):
 
         # --- macro de teclado ---
         self.key_sel = QComboBox(); self.key_sel.addItems(KEYS.keys())
-        self.key_sel.setMaxVisibleItems(20)
+        self._scrollable(self.key_sel)
         self.key_sel.setCurrentText(cfg.get("key", "Space"))
         self.key_interval = QDoubleSpinBox()
         self.key_interval.setRange(1.0, 10000.0)
@@ -1466,6 +1470,7 @@ class App(QWidget):
         self.win_sel = QComboBox()
         self.win_sel.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.win_sel.setMinimumContentsLength(22)
+        self._scrollable(self.win_sel)
         self.win_refresh = QPushButton("↻")
         self.win_refresh.setFixedWidth(30)
         self.win_refresh.clicked.connect(self.refresh_windows)
@@ -1473,21 +1478,32 @@ class App(QWidget):
         win_row.addWidget(self.win_sel, 1)
         win_row.addWidget(self.win_refresh)
         self.win_key = QComboBox(); self.win_key.addItems(KEYS.keys())
-        self.win_key.setMaxVisibleItems(20)
+        self._scrollable(self.win_key)
         self.win_key.setCurrentText(cfg.get("target_key", "Space"))
+        self.win_sel.currentIndexChanged.connect(self._update_win_warn)
         self.win_secs = QSpinBox(); self.win_secs.setRange(1, 3600)
         self.win_secs.setValue(cfg.get("target_seconds", 60))
         self.win_secs.setSuffix(" s")
         self.win_secs.valueChanged.connect(self._target_restart)
 
+        self.win_warn = QLabel("")
+        self.win_warn.setWordWrap(True)
+        self.win_warn.setStyleSheet("color:#d04030;font-size:11px;")
+        self.win_warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
         target_form = QFormLayout()
         self._row(target_form, "Window:", win_row)
         self._row(target_form, "Key:", self.win_key)
         self._row(target_form, "Every:", self.win_secs)
-        self.target_box = QGroupBox(_("Send key to a window (beta)"))
+        # o aviso fica fora do form: QLabel com quebra de linha dentro de
+        # QFormLayout não calcula a altura e sai cortado
+        target_col = QVBoxLayout()
+        target_col.addLayout(target_form)
+        target_col.addWidget(self.win_warn)
+        self.target_box = QGroupBox(_("Send key to a window"))
         self.target_box.setCheckable(True)
         self.target_box.setChecked(False)
-        self.target_box.setLayout(target_form)
+        self.target_box.setLayout(target_col)
         self.target_box.toggled.connect(self._target_toggled)
 
         # --- anti-AFK (independente do Start) ---
@@ -1521,8 +1537,7 @@ class App(QWidget):
         checks.addWidget(self.autostart)
         checks.addStretch()
 
-        lay = QVBoxLayout(self)
-        lay.setMenuBar(self._build_menu())
+        lay = QVBoxLayout()
         lay.addWidget(self.tip)
         lay.addWidget(self.click_box)
         lay.addWidget(self.key_box)
@@ -1533,7 +1548,21 @@ class App(QWidget):
         lay.addWidget(self.status)
         lay.addWidget(self.btn)
         lay.addWidget(self.warn)
-        self.resize(430, 440)
+
+        # corpo rolável: em tela baixa o conteúdo não cabe todo e o layout
+        # começa a espremer as linhas dos grupos em vez de deixar rolar
+        body = QWidget()
+        body.setLayout(lay)
+        scroll = QScrollArea()
+        scroll.setWidget(body)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setMenuBar(self._build_menu())
+        outer.addWidget(scroll)
+        self.resize(450, min(940, body.sizeHint().height() + 60))
         self.setWindowIcon(mouse_icon())
         self._show_rate()
         self._paint_status()
@@ -1617,6 +1646,14 @@ class App(QWidget):
                 "Move the cursor off this window before starting — otherwise "
                 "it clicks itself. That is what the {d}s start delay is for. "
                 "{hk} toggles; Esc stops.", d=self.delay.value(), hk=hk))
+
+    @staticmethod
+    def _scrollable(combo, visible=5):
+        """Popup com no máximo `visible` itens e barra de rolagem. O
+        combobox-popup:0 é o que faz o Qt largar o popup nativo, que ignora
+        maxVisibleItems e abre uma lista do tamanho da tela."""
+        combo.setMaxVisibleItems(visible)
+        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
 
     # -------------------------------------------------------- menu/i18n --
     def _row(self, form, text, widget):
@@ -1715,7 +1752,8 @@ class App(QWidget):
         self.key_box.setTitle(_("Keyboard macro"))
         self.trigger_box.setTitle(_("Trigger"))
         self.afk.setText(_("Anti-AFK: nudge the cursor every"))
-        self.target_box.setTitle(_("Send key to a window (beta)"))
+        self.target_box.setTitle(_("Send key to a window"))
+        self._update_win_warn()
         self.sound.setText(_("Sound feedback on hotkey"))
         self.autostart.setText(_("Start with system"))
         self.refresh_btn.setToolTip(_("Rescan mice"))
@@ -2041,10 +2079,38 @@ class App(QWidget):
         self.win_sel.setCurrentIndex(idx if idx >= 0 else 0)
         self.win_sel.blockSignals(False)
         self.win_sel.setEnabled(bool(wins))
+        self._update_win_warn()
         if not self.bridge.ok:
             self.warn.setText(_("Targeted key unavailable: {msg}",
                                 msg=self.bridge.error or "?"))
         return wins
+
+    def _update_win_warn(self):
+        """Wayland puro não tem como receber tecla endereçada: avisa e ensina
+        a reabrir o programa como cliente X11, que aí entra na injeção real."""
+        if not hasattr(self, "win_warn"):
+            return
+        sel = self.win_sel.currentData() or {}
+        if not self.win_sel.isEnabled() or not sel or sel.get("xid"):
+            self._set_win_warn("")
+        else:
+            self._set_win_warn(_(
+                "⚠ Pure Wayland: reachable only by stealing focus for an "
+                "instant. Reopen this program in X11 mode and it takes the key "
+                "directly, even minimized — SDL_VIDEODRIVER=x11, "
+                "GDK_BACKEND=x11 or QT_QPA_PLATFORM=xcb."))
+
+    def _set_win_warn(self, text):
+        """Reserva a altura de verdade do texto: QLabel com quebra de linha
+        informa uma linha só como mínimo, e o layout espreme as linhas de cima."""
+        self.win_warn.setText(text)
+        if not text:
+            self.win_warn.setMinimumHeight(0)
+            return
+        width = max(self.win_warn.width(), 360)
+        rect = self.win_warn.fontMetrics().boundingRect(
+            0, 0, width, 0, Qt.TextWordWrap, text)
+        self.win_warn.setMinimumHeight(rect.height() + 6)
 
     def _target_ready(self):
         """Janela escolhida pronta. Só janela Wayland precisa do teclado
@@ -2060,9 +2126,6 @@ class App(QWidget):
                 self.warn.setText(_("That key has no X11 equivalent."))
                 return False
             return True
-        self.warn.setText(_("Wayland window: WayClick has to focus it for an "
-                            "instant to deliver the key. X11 windows (⌨) take "
-                            "it directly, even minimized."))
         return self.ensure_keyboard()
 
     def _target_start(self):
