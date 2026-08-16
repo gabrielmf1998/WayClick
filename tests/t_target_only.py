@@ -42,7 +42,9 @@ def setup():
     hid = next((x["id"] for x in wins if x["title"] == "WCHOST"), None)
     if not (tid and hid):
         print("não achei as janelas de teste"); app.quit(); return
-    w.win_sel.setCurrentIndex(w.win_sel.findData(tid))
+    idx = next((i for i in range(w.win_sel.count())
+                if (w.win_sel.itemData(i) or {}).get("id") == tid), -1)
+    w.win_sel.setCurrentIndex(idx)
     w.target_box.setChecked(True)
     w.win_key.setCurrentText("Space")
     w.win_secs.setValue(2)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """WayClick — autoclicker para Wayland via /dev/uinput (kernel), sem X11."""
-import fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil, struct
+import ctypes, fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil
+import struct
 import signal, subprocess, sys, tempfile, threading, time, wave
 
 try:
@@ -745,6 +746,29 @@ class Beeper:
 
 
 # -------------------------------------- injeção direcionada a uma janela ----
+class XKeyEvent(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                ("window", ctypes.c_ulong), ("root", ctypes.c_ulong),
+                ("subwindow", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                ("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("x_root", ctypes.c_int), ("y_root", ctypes.c_int),
+                ("state", ctypes.c_uint), ("keycode", ctypes.c_uint),
+                ("same_screen", ctypes.c_int)]
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [("type", ctypes.c_int), ("xkey", XKeyEvent),
+                ("pad", ctypes.c_long * 24)]
+
+
+class XClassHint(ctypes.Structure):
+    # c_void_p e não c_char_p: com c_char_p o ctypes entrega bytes já copiados e
+    # o XFree acabaria liberando o ponteiro errado, corrompendo o heap
+    _fields_ = [("res_name", ctypes.c_void_p), ("res_class", ctypes.c_void_p)]
+
+
+
 # No Wayland não existe "entregar este evento naquela janela": o input pertence
 # ao seat e vai para quem está em foco — nem o fake_input do KWin, único
 # protocolo de injeção que ele implementa, tem argumento de surface.
@@ -778,6 +802,164 @@ for (var i = 0; i < ws.length; i++) {
 }
 callDBus("%(svc)s", "%(path)s", "%(iface)s", "reply", prev);
 """
+
+
+class XInject:
+    """Injeção de tecla numa janela X11 específica, via XSendEvent.
+
+    Este é o único caminho que entrega input a uma janela sem mexer no foco do
+    usuário: o X11 endereça o evento à janela, e o cliente processa mesmo sem
+    foco e mesmo minimizado — medido, 3 de 3 nas duas situações. É o oposto do
+    Wayland, onde o evento vai para quem tem foco e ponto.
+
+    Vale só para clientes X11 (sob Xwayland). App Wayland nativo não tem window
+    id para endereçar. E o evento vai marcado como sintético, então app que só
+    aceita input "de verdade" pode ignorar — por isso a UI testa antes.
+    """
+    KEYPRESS, KEYRELEASE = 2, 3
+    PRESS_MASK, RELEASE_MASK = 1 << 0, 1 << 1
+
+    def __init__(self):
+        self.ok = False
+        self.error = None
+        self.dpy = None
+        if not os.environ.get("DISPLAY"):
+            self.error = "no X11 display (Xwayland not running)"
+            return
+        try:
+            import ctypes.util
+            lib = ctypes.util.find_library("X11")
+            self.x = ctypes.CDLL(lib) if lib else None
+        except OSError:
+            self.x = None
+        if not self.x:
+            self.error = "libX11 not found"
+            return
+        self._declare()
+        self.dpy = self.x.XOpenDisplay(None)
+        if not self.dpy:
+            self.error = "could not open the X11 display"
+            return
+        self.root = self.x.XDefaultRootWindow(self.dpy)
+        self.ok = True
+
+    def _declare(self):
+        """ctypes sem argtypes trunca ponteiro para int e derruba o processo."""
+        x, D, W = self.x, ctypes.c_void_p, ctypes.c_ulong
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]; x.XOpenDisplay.restype = D
+        x.XDefaultRootWindow.argtypes = [D]; x.XDefaultRootWindow.restype = W
+        x.XInternAtom.argtypes = [D, ctypes.c_char_p, ctypes.c_int]
+        x.XInternAtom.restype = W
+        x.XGetWindowProperty.argtypes = [
+            D, W, W, ctypes.c_long, ctypes.c_long, ctypes.c_int, W,
+            ctypes.POINTER(W), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+        x.XGetWindowProperty.restype = ctypes.c_int
+        x.XFree.argtypes = [ctypes.c_void_p]
+        x.XStringToKeysym.argtypes = [ctypes.c_char_p]
+        x.XStringToKeysym.restype = W
+        x.XKeysymToKeycode.argtypes = [D, W]
+        x.XKeysymToKeycode.restype = ctypes.c_ubyte
+        x.XSendEvent.argtypes = [D, W, ctypes.c_int, ctypes.c_long,
+                                 ctypes.POINTER(XEvent)]
+        x.XSendEvent.restype = ctypes.c_int
+        x.XFlush.argtypes = [D]; x.XFlush.restype = ctypes.c_int
+        x.XGetClassHint.argtypes = [D, W, ctypes.POINTER(XClassHint)]
+        x.XGetClassHint.restype = ctypes.c_int
+
+    def _prop(self, win, name, prop_type):
+        actual_type = ctypes.c_ulong()
+        actual_fmt = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        after = ctypes.c_ulong()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        atom = self.x.XInternAtom(self.dpy, name.encode(), 0)
+        r = self.x.XGetWindowProperty(
+            self.dpy, win, atom, 0, 1024, 0, prop_type,
+            ctypes.byref(actual_type), ctypes.byref(actual_fmt),
+            ctypes.byref(nitems), ctypes.byref(after), ctypes.byref(data))
+        if r != 0 or not data:
+            return None, 0
+        return data, nitems.value
+
+    def windows(self):
+        """[(xid, pid, classe)] das janelas X11 gerenciadas agora."""
+        out = []
+        data, n = self._prop(self.root, "_NET_CLIENT_LIST", 33)   # XA_WINDOW
+        if not data:
+            return out
+        ids = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
+        wins = [ids[i] for i in range(n)]
+        self.x.XFree(data)
+        for w in wins:
+            pid = 0
+            d, cnt = self._prop(w, "_NET_WM_PID", 6)              # XA_CARDINAL
+            if d and cnt:
+                pid = ctypes.cast(d, ctypes.POINTER(ctypes.c_ulong))[0]
+                self.x.XFree(d)
+            hint = XClassHint()
+            cls = ""
+            if self.x.XGetClassHint(self.dpy, w, ctypes.byref(hint)):
+                if hint.res_class:
+                    cls = ctypes.string_at(hint.res_class).decode(errors="replace")
+                    self.x.XFree(hint.res_class)
+                if hint.res_name:
+                    self.x.XFree(hint.res_name)
+            out.append((w, int(pid), cls))
+        return out
+
+    def send_key(self, win, keysym_name, hold=0.05):
+        """press + release endereçados à janela. O hold importa: sem ele, quem
+        consulta estado por quadro não vê nada."""
+        if not self.ok:
+            return False
+        ks = self.x.XStringToKeysym(keysym_name.encode())
+        if not ks:
+            return False
+        kc = self.x.XKeysymToKeycode(self.dpy, ks)
+        for etype, mask in ((self.KEYPRESS, self.PRESS_MASK),
+                            (self.KEYRELEASE, self.RELEASE_MASK)):
+            ev = XEvent()
+            ev.type = etype
+            k = ev.xkey
+            k.type, k.display, k.window, k.root = etype, self.dpy, win, self.root
+            k.subwindow, k.time = 0, 0
+            k.x = k.y = k.x_root = k.y_root = 1
+            k.state, k.keycode, k.same_screen = 0, kc, 1
+            self.x.XSendEvent(self.dpy, win, 1, mask, ctypes.byref(ev))
+            self.x.XFlush(self.dpy)
+            if etype == self.KEYPRESS:
+                time.sleep(hold)
+        return True
+
+
+# nomes de keysym do X para as teclas que a macro oferece
+X_KEYSYM = {"Space": "space", "Enter": "Return", "Tab": "Tab", "Esc": "Escape",
+            "Backspace": "BackSpace", "Delete": "Delete", "Insert": "Insert",
+            "Home": "Home", "End": "End", "Page Up": "Prior",
+            "Page Down": "Next", "Up": "Up", "Down": "Down", "Left": "Left",
+            "Right": "Right", "Left Shift": "Shift_L",
+            "Right Shift": "Shift_R", "Left Ctrl": "Control_L",
+            "Right Ctrl": "Control_R", "Left Alt": "Alt_L",
+            "Right Alt": "Alt_R", "Left Super": "Super_L",
+            "Right Super": "Super_R"}
+
+
+def x_keysym(name):
+    """Nome da tecla na UI -> keysym do X."""
+    if name in X_KEYSYM:
+        return X_KEYSYM[name]
+    if len(name) == 1:
+        return name.lower() if name.isalpha() else name
+    if name.startswith("F") and name[1:].isdigit():
+        return name
+    if name.startswith("Numpad "):
+        tail = name.split(" ", 1)[1]
+        return {"+": "KP_Add", "-": "KP_Subtract", "*": "KP_Multiply",
+                "/": "KP_Divide", ".": "KP_Decimal",
+                "Enter": "KP_Enter"}.get(tail, "KP_" + tail)
+    return None
 
 
 class KWinBridge(QObject):
@@ -943,6 +1125,12 @@ TRANSLATIONS = {
         "Lost the target window.": "Perdi a janela alvo.",
         "Pick a window first (↻ to rescan).":
             "Escolha uma janela primeiro (↻ para reprocurar).",
+        "That key has no X11 equivalent.": "Essa tecla não tem equivalente no X11.",
+        "Wayland window: WayClick has to focus it for an instant to deliver the "
+        "key. X11 windows (⌨) take it directly, even minimized.":
+            "Janela Wayland: o WayClick precisa dar foco a ela por um instante "
+            "para entregar a tecla. Janela X11 (⌨) recebe direto, mesmo "
+            "minimizada.",
         "Nothing to run: enable Click, Keyboard macro or Send key to a window.":
             "Nada para executar: habilite Clique, Macro de teclado ou Mandar "
             "tecla para uma janela.",
@@ -1376,6 +1564,7 @@ class App(QWidget):
         self.beeper = Beeper()
         self.holder = None      # MouseHold, só no modo "mouse_hold"
         self.bridge = None      # KWinBridge, criado sob demanda
+        self.xinject = None     # XInject, para janelas X11
         self.target_hits = 0
         self.target_ms = 0.0
         self.target_timer = QTimer(self)
@@ -1829,16 +2018,26 @@ class App(QWidget):
         """Lista as janelas abertas, com ícone, mantendo a seleção se possível."""
         if self.bridge is None:
             self.bridge = KWinBridge()
-        keep = self.win_sel.currentData()
+        keep = (self.win_sel.currentData() or {}).get("id")
         self.win_sel.blockSignals(True)
         self.win_sel.clear()
         wins = self.bridge.windows() if self.bridge.ok else []
+        if self.xinject is None:
+            self.xinject = XInject()
+        xs = self.xinject.windows() if self.xinject.ok else []
+        by_pid = {pid: xid for xid, pid, _cls in xs if pid}
+        by_cls = {cls.lower(): xid for xid, _pid, cls in xs if cls}
         for w in wins:
-            label = f"{w['title'][:38]}  —  {w['cls']}"
-            self.win_sel.addItem(app_icon(w["cls"]), label, w["id"])
+            xid = by_pid.get(w["pid"]) or by_cls.get(w["cls"].lower())
+            w["xid"] = xid
+            mark = "⌨ " if xid else "◐ "     # injeção real x precisa de foco
+            label = f"{mark}{w['title'][:36]}  —  {w['cls']}"
+            self.win_sel.addItem(app_icon(w["cls"]), label,
+                                 {"id": w["id"], "xid": xid})
         if not wins:
             self.win_sel.addItem(_("no window found"), None)
-        idx = self.win_sel.findData(keep)
+        idx = next((i for i in range(self.win_sel.count())
+                    if (self.win_sel.itemData(i) or {}).get("id") == keep), -1)
         self.win_sel.setCurrentIndex(idx if idx >= 0 else 0)
         self.win_sel.blockSignals(False)
         self.win_sel.setEnabled(bool(wins))
@@ -1848,12 +2047,22 @@ class App(QWidget):
         return wins
 
     def _target_ready(self):
-        """Janela escolhida e teclado virtual prontos."""
+        """Janela escolhida pronta. Só janela Wayland precisa do teclado
+        virtual: a X11 recebe a tecla endereçada, sem passar pelo seat."""
         if not self.win_sel.count() or self.win_sel.currentData() is None:
             self.refresh_windows()
-        if self.win_sel.currentData() is None:
+        sel = self.win_sel.currentData()
+        if not sel:
             self.warn.setText(_("Pick a window first (↻ to rescan)."))
             return False
+        if sel.get("xid"):
+            if not x_keysym(self.win_key.currentText()):
+                self.warn.setText(_("That key has no X11 equivalent."))
+                return False
+            return True
+        self.warn.setText(_("Wayland window: WayClick has to focus it for an "
+                            "instant to deliver the key. X11 windows (⌨) take "
+                            "it directly, even minimized."))
         return self.ensure_keyboard()
 
     def _target_start(self):
@@ -1880,9 +2089,23 @@ class App(QWidget):
             self.target_timer.start(self.win_secs.value() * 1000)
 
     def _target_tick(self):
-        """Foco na alvo -> tecla -> foco de volta. ~25 ms de piscada."""
-        wid = self.win_sel.currentData()
-        if not wid or not self.keyboard:
+        """Janela X11: injeta direto, sem tocar no foco nem precisar dela
+        visível. Janela Wayland: não há como endereçar, então cai no truque de
+        dar foco por um instante e devolver."""
+        sel = self.win_sel.currentData() or {}
+        wid, xid = sel.get("id"), sel.get("xid")
+        if not wid:
+            return
+        if xid:
+            keysym = x_keysym(self.win_key.currentText())
+            if keysym and self.xinject and self.xinject.ok:
+                t0 = time.perf_counter()
+                if self.xinject.send_key(xid, keysym):
+                    self.target_hits += 1
+                    self.target_ms = (time.perf_counter() - t0) * 1000
+                    self._show_status()
+                    return
+        if not self.keyboard:
             return
         t0 = time.perf_counter()
         prev = self.bridge.activate(wid)
