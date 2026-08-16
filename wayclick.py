@@ -868,6 +868,15 @@ class XInject:
         x.XFlush.argtypes = [D]; x.XFlush.restype = ctypes.c_int
         x.XGetClassHint.argtypes = [D, W, ctypes.POINTER(XClassHint)]
         x.XGetClassHint.restype = ctypes.c_int
+        x.XkbKeycodeToKeysym.argtypes = [D, ctypes.c_ubyte, ctypes.c_uint,
+                                         ctypes.c_uint]
+        x.XkbKeycodeToKeysym.restype = W
+        x.XKeysymToString.argtypes = [W]
+        x.XKeysymToString.restype = ctypes.c_char_p
+        x.XQueryTree.argtypes = [D, W, ctypes.POINTER(W), ctypes.POINTER(W),
+                                 ctypes.POINTER(ctypes.POINTER(W)),
+                                 ctypes.POINTER(ctypes.c_uint)]
+        x.XQueryTree.restype = ctypes.c_int
 
     def _prop(self, win, name, prop_type):
         actual_type = ctypes.c_ulong()
@@ -910,6 +919,37 @@ class XInject:
             out.append((w, int(pid), cls))
         return out
 
+    def keysym_name(self, evdev_code):
+        """Código evdev -> nome de keysym do X, direto do mapa de teclado.
+        Evita manter uma tabela de tradução à mão."""
+        if not self.ok:
+            return None
+        ks = self.x.XkbKeycodeToKeysym(self.dpy, evdev_code + 8, 0, 0)
+        if not ks:
+            return None
+        name = self.x.XKeysymToString(ks)
+        return name.decode() if name else None
+
+    def children(self, win, depth=2, limit=6):
+        """Subjanelas do alvo. Muita aplicação recebe o input numa janela
+        filha, não na de topo que o gerenciador lista."""
+        out = []
+        root, parent = ctypes.c_ulong(), ctypes.c_ulong()
+        kids = ctypes.POINTER(ctypes.c_ulong)()
+        nkids = ctypes.c_uint()
+        if not self.x.XQueryTree(self.dpy, win, ctypes.byref(root),
+                                 ctypes.byref(parent), ctypes.byref(kids),
+                                 ctypes.byref(nkids)):
+            return out
+        for i in range(min(nkids.value, limit)):
+            child = kids[i]
+            out.append(child)
+            if depth > 1:
+                out.extend(self.children(child, depth - 1, limit))
+        if kids:
+            self.x.XFree(kids)
+        return out[:limit]
+
     def send_key(self, win, keysym_name, hold=0.05):
         """press + release endereçados à janela. O hold importa: sem ele, quem
         consulta estado por quadro não vê nada."""
@@ -919,20 +959,88 @@ class XInject:
         if not ks:
             return False
         kc = self.x.XKeysymToKeycode(self.dpy, ks)
+        targets = [win] + self.children(win)
+        stamp = int(time.time() * 1000) & 0xFFFFFFFF   # app costuma olhar time
         for etype, mask in ((self.KEYPRESS, self.PRESS_MASK),
                             (self.KEYRELEASE, self.RELEASE_MASK)):
-            ev = XEvent()
-            ev.type = etype
-            k = ev.xkey
-            k.type, k.display, k.window, k.root = etype, self.dpy, win, self.root
-            k.subwindow, k.time = 0, 0
-            k.x = k.y = k.x_root = k.y_root = 1
-            k.state, k.keycode, k.same_screen = 0, kc, 1
-            self.x.XSendEvent(self.dpy, win, 1, mask, ctypes.byref(ev))
+            for target in targets:
+                ev = XEvent()
+                ev.type = etype
+                k = ev.xkey
+                k.type, k.display = etype, self.dpy
+                k.window, k.root, k.subwindow = target, self.root, 0
+                k.time = stamp
+                k.x = k.y = k.x_root = k.y_root = 1
+                k.state, k.keycode, k.same_screen = 0, kc, 1
+                self.x.XSendEvent(self.dpy, target, 0, mask, ctypes.byref(ev))
             self.x.XFlush(self.dpy)
+            stamp += int(hold * 1000)
             if etype == self.KEYPRESS:
                 time.sleep(hold)
         return True
+
+
+CODE_NAMES = {}
+for _n, _c in KEYS.items():
+    CODE_NAMES.setdefault(_c, _n)
+
+
+def key_label(code, event=None):
+    """Nome amigável para um código evdev capturado do teclado."""
+    if code in CODE_NAMES:
+        return CODE_NAMES[code]
+    if event is not None:
+        txt = QKeySequence(event.key()).toString()
+        if txt:
+            return txt
+    return f"key {code}"
+
+
+class KeyCatcher(QPushButton):
+    """Clique e aperte a tecla. Melhor que caçar numa lista de 122 itens, e
+    pega qualquer tecla do teclado, não só as que estão na lista: o Qt entrega
+    o scancode nativo, que é o código evdev + 8 (conferido em letra, função,
+    modificador, numérico e seta)."""
+    changed = Signal()
+
+    def __init__(self, code=57, name="Space"):
+        super().__init__()
+        self.code, self.name = code, name
+        self._arming = False
+        self.clicked.connect(self._arm)
+        self.setToolTip(_("Click, then press the key you want"))
+        self._refresh()
+
+    def _refresh(self):
+        self.setText(_("Press a key…") if self._arming else self.name)
+
+    def _arm(self):
+        self._arming = True
+        self._refresh()
+        self.setFocus()
+        self.grabKeyboard()
+
+    def _disarm(self):
+        self._arming = False
+        self.releaseKeyboard()
+        self._refresh()
+
+    def set_key(self, code, name=None):
+        self.code = code
+        self.name = name or key_label(code)
+        self._arming = False
+        self._refresh()
+        self.changed.emit()
+
+    def keyPressEvent(self, event):
+        if not self._arming:
+            return          # sem isso Space e Enter re-disparariam o botão
+        code = event.nativeScanCode() - 8
+        if event.key() == Qt.Key_Escape:
+            self._disarm()
+            return
+        self.releaseKeyboard()
+        self.set_key(code, key_label(code, event))
 
 
 # nomes de keysym do X para as teclas que a macro oferece
@@ -1119,6 +1227,9 @@ TRANSLATIONS = {
         "Show window": "Mostrar janela", "Hide window": "Esconder janela",
         "Quit": "Sair", "About": "Sobre",
         "Project on GitHub": "Projeto no GitHub",
+        "Press a key…": "Aperte uma tecla…",
+        "Click, then press the key you want":
+            "Clique e depois aperte a tecla que quiser",
         "Send key to a window": "Mandar tecla para uma janela",
         "Window:": "Janela:", "Every:": "A cada:",
         "no window found": "nenhuma janela encontrada",
@@ -1418,9 +1529,8 @@ class App(QWidget):
         self.autostart.toggled.connect(self._toggle_autostart)
 
         # --- macro de teclado ---
-        self.key_sel = QComboBox(); self.key_sel.addItems(KEYS.keys())
-        self._scrollable(self.key_sel)
-        self.key_sel.setCurrentText(cfg.get("key", "Space"))
+        self.key_sel = KeyCatcher(cfg.get("key_code", KEYS["Space"]),
+                                  cfg.get("key", "Space"))
         self.key_interval = QDoubleSpinBox()
         self.key_interval.setRange(1.0, 10000.0)
         self.key_interval.setDecimals(0)
@@ -1477,9 +1587,8 @@ class App(QWidget):
         win_row = QHBoxLayout()
         win_row.addWidget(self.win_sel, 1)
         win_row.addWidget(self.win_refresh)
-        self.win_key = QComboBox(); self.win_key.addItems(KEYS.keys())
-        self._scrollable(self.win_key)
-        self.win_key.setCurrentText(cfg.get("target_key", "Space"))
+        self.win_key = KeyCatcher(cfg.get("target_key_code", KEYS["Space"]),
+                                  cfg.get("target_key", "Space"))
         self.win_sel.currentIndexChanged.connect(self._update_win_warn)
         self.win_secs = QSpinBox(); self.win_secs.setRange(1, 3600)
         self.win_secs.setValue(cfg.get("target_seconds", 60))
@@ -2012,7 +2121,7 @@ class App(QWidget):
             self.clicker.start()
         if self.key_box.isChecked() and self.ensure_keyboard():
             self.keymacro = KeyMacro(self.keyboard, self.key_interval.value(),
-                                     KEYS[self.key_sel.currentText()],
+                                     self.key_sel.code,
                                      self.key_mode.currentData() == "Hold")
             self.keymacro.start()
         self._state = "run"
@@ -2085,6 +2194,11 @@ class App(QWidget):
                                 msg=self.bridge.error or "?"))
         return wins
 
+    def _ensure_xinject(self):
+        if self.xinject is None:
+            self.xinject = XInject()
+        return self.xinject
+
     def _update_win_warn(self):
         """Wayland puro não tem como receber tecla endereçada: avisa e ensina
         a reabrir o programa como cliente X11, que aí entra na injeção real."""
@@ -2122,7 +2236,8 @@ class App(QWidget):
             self.warn.setText(_("Pick a window first (↻ to rescan)."))
             return False
         if sel.get("xid"):
-            if not x_keysym(self.win_key.currentText()):
+            if not ((self._ensure_xinject().keysym_name(self.win_key.code))
+                    or x_keysym(self.win_key.name)):
                 self.warn.setText(_("That key has no X11 equivalent."))
                 return False
             return True
@@ -2160,7 +2275,8 @@ class App(QWidget):
         if not wid:
             return
         if xid:
-            keysym = x_keysym(self.win_key.currentText())
+            keysym = (self._ensure_xinject().keysym_name(self.win_key.code)
+                      or x_keysym(self.win_key.name))
             if keysym and self.xinject and self.xinject.ok:
                 t0 = time.perf_counter()
                 if self.xinject.send_key(xid, keysym):
@@ -2177,7 +2293,7 @@ class App(QWidget):
             self.target_box.setChecked(False)
             return
         # o hold do tap já é a folga para a tecla chegar antes de devolver foco
-        self.keyboard.tap(KEYS[self.win_key.currentText()])
+        self.keyboard.tap(self.win_key.code)
         self.target_hits += 1
         if prev and prev != wid:
             self.bridge.activate(prev)
@@ -2209,7 +2325,7 @@ class App(QWidget):
             if self.clicker:
                 parts.append(self._rate_str())
             if self.keymacro:
-                parts.append(f"{self.key_sel.currentText()} "
+                parts.append(f"{self.key_sel.name} "
                              + (_("held") if self.keymacro.hold
                                 else f"{self.key_interval.value():.0f} ms"))
             txt = ("● " + _("RUNNING") + "  ("
@@ -2221,7 +2337,7 @@ class App(QWidget):
         if self.antiafk:
             txt += "   ⟲ " + _("anti-AFK")
         if self.target_timer.isActive():
-            txt += ("   ⌨ " + self.win_key.currentText()
+            txt += ("   ⌨ " + self.win_key.name
                     + f" ×{self.target_hits}"
                     + (f" ({self.target_ms:.0f} ms)" if self.target_ms else ""))
         self.status.setText(txt)
@@ -2283,11 +2399,13 @@ class App(QWidget):
                            "mouse_name": self.selected_mouse()[1],
                            "click_enabled": self.click_box.isChecked(),
                            "key_enabled": self.key_box.isChecked(),
-                           "key": self.key_sel.currentText(),
+                           "key": self.key_sel.name,
+                           "key_code": self.key_sel.code,
                            "key_interval_ms": self.key_interval.value(),
                            "key_mode": self.key_mode.currentData(),
                            "afk_seconds": self.afk_secs.value(),
-                           "target_key": self.win_key.currentText(),
+                           "target_key": self.win_key.name,
+                           "target_key_code": self.win_key.code,
                            "target_seconds": self.win_secs.value(),
                            "theme": self.theme,
                            "language": LANG}, fh)

@@ -79,7 +79,7 @@ def go():
     pump(0.5)
     R["active"] = next((x["title"] for x in w.bridge.windows() if x["active"]), "?")
 
-    w.win_key.setCurrentText("Space")
+    w.win_key.set_key(a.KEYS["Space"], "Space")
     w.win_secs.setValue(1)
     w.delay.setValue(0)
     w.target_box.setChecked(True)

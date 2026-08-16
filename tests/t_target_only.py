@@ -46,7 +46,7 @@ def setup():
                 if (w.win_sel.itemData(i) or {}).get("id") == tid), -1)
     w.win_sel.setCurrentIndex(idx)
     w.target_box.setChecked(True)
-    w.win_key.setCurrentText("Space")
+    w.win_key.set_key(a.KEYS["Space"], "Space")
     w.win_secs.setValue(2)
     w.delay.setValue(0)
     w.bridge.activate(hid)

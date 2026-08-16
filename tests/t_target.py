@@ -50,7 +50,7 @@ def setup():
     idx = next((i for i in range(w.win_sel.count())
                 if (w.win_sel.itemData(i) or {}).get("id") == tid), -1)
     w.win_sel.setCurrentIndex(idx)
-    w.win_key.setCurrentText("Space")
+    w.win_key.set_key(a.KEYS["Space"], "Space")
     w.win_secs.setValue(1)
     w.click_box.setChecked(True)      # alvo + clique juntos
     w.bridge.activate(hid)                  # usuário "usando" a host

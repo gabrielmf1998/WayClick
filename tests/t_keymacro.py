@@ -28,7 +28,7 @@ app.aboutToQuit.connect(w.cleanup)
 w.sound.setChecked(False)
 w.click_box.setChecked(False)          # só teclado neste teste
 w.key_box.setChecked(True)
-w.key_sel.setCurrentText("Space")
+w.key_sel.set_key(a.KEYS["Space"], "Space")
 w.key_interval.setValue(50.0)
 w.key_mode.setCurrentText("Repeat")
 w.delay.setValue(0); w.duration.setValue(0)
@@ -49,7 +49,7 @@ def phase_repeat():
 
 def phase_hold():
     w.key_mode.setCurrentText("Hold")
-    w.key_sel.setCurrentText("Left Shift")   # modificador: nao tem auto-repeat
+    w.key_sel.set_key(a.KEYS["Left Shift"], "Left Shift")   # modificador: nao tem auto-repeat
     base = dict(got)
     w.set_running(True)
     QTimer.singleShot(900, lambda: (
