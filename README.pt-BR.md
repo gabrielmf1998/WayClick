@@ -19,6 +19,8 @@ compositor e sem nada rodando como root.
 - **Atalho global** que funciona mesmo com a janela fora de foco
 - **Modo segurar** — só clica enquanto você segura o botão do mouse
 - **Macro de teclado** — 122 teclas, repetindo ou segurando
+- **Mandar tecla para uma janela** — escolha uma janela aberta e alimente ela
+  com uma tecla; em alvo X11 chega sem mexer no foco, mesmo minimizada
 - **Anti-AFK** — mexe o ponteiro e devolve, com deriva zero
 - **Ícone na bandeja**, iniciar com o sistema, tema claro/escuro, inglês e
   português
@@ -109,9 +111,10 @@ wayclick --tray     # começa escondido na bandeja
 wayclick --version
 ```
 
-A janela tem três caixas. **Clique** e **Macro de teclado** são o que roda, e as
-duas são ativáveis — habilite uma, a outra, ou as duas. **Acionamento** é como
-liga e desliga. O Anti-AFK fica por fora, independente do Iniciar/Parar.
+A janela tem quatro caixas ativáveis. **Clique**, **Macro de teclado** e
+**Mandar tecla para uma janela** são o que roda — habilite qualquer combinação.
+**Acionamento** é como liga e desliga. O Anti-AFK fica por fora, independente do
+Iniciar/Parar.
 
 O resto está na barra de menus: **Arquivo** inicia, para, esconde na bandeja e
 sai; **Configurações** tem **Tema** (Sistema, Escuro, Claro) e **Idioma**
@@ -168,6 +171,38 @@ Funciona de qualquer janela. `Esc` sempre para, com a janela em foco.
 **Som ao acionar** — um bipe agudo ao ligar e grave ao desligar, para você saber
 que o atalho pegou sem precisar olhar.
 
+### Mandar tecla para uma janela
+
+Escolha uma das suas janelas abertas e o WayClick alimenta ela com uma tecla no
+intervalo definido — espaço num jogo a cada 60 s, por exemplo, enquanto você
+continua trabalhando. A lista mostra cada janela aberta com o ícone real do
+programa e uma marca de como a tecla vai chegar:
+
+| | |
+|---|---|
+| **⌨** | Janela X11 (Xwayland). A tecla é endereçada àquela janela: seu foco nunca é tocado, e funciona **mesmo minimizada**. |
+| **◐** | Janela Wayland pura. Não há como endereçar, então o WayClick dá foco a ela por ~40 ms, manda a tecla e devolve o foco. |
+
+Medido contra um alvo X11 em processo próprio, com o foco parado em outra janela
+o tempo todo: 3 de 3 entregues sem foco, mais 6 com a janela minimizada, 0
+vazaram para a janela em foco.
+
+Se a janela escolhida for Wayland pura, o grupo mostra um aviso vermelho. A saída
+é reabrir aquele programa como cliente X11, o que normalmente é uma variável de
+ambiente:
+
+```bash
+SDL_VIDEODRIVER=x11 ./jogo          # SDL (a maioria dos jogos)
+GDK_BACKEND=x11 ./app               # GTK
+QT_QPA_PLATFORM=xcb ./app           # Qt
+flatpak run --env=SDL_VIDEODRIVER=x11 org.exemplo.App
+```
+
+Aí ele passa a aparecer como ⌨ e recebe a tecla direto. Dois poréns honestos:
+programa que lê input raw pode ignorar evento sintético do X11, e isto vale só
+para teclado — clique segue o cursor, não o foco, então mirar clique numa janela
+exigiria teleportar seu ponteiro.
+
 ### Anti-AFK
 
 Mexe o ponteiro alguns pixels e devolve para onde estava, a cada N segundos. É
@@ -206,6 +241,14 @@ sub-milissegundo.
 **Atalho global** — lê `/dev/input/event*` direto, único jeito de enxergar
 teclas que não estão indo para a sua janela. Teclados criados por remapeadores
 (keyd, kmonad, input-remapper) valem como fonte.
+
+**Tecla por janela** — o Wayland entrega input para quem tem foco e não oferece
+como endereçar uma surface; o `fake_input` do KWin, único protocolo de injeção
+que ele implementa, também não tem argumento de surface. O X11 é o oposto: o
+`XSendEvent` carrega a janela de destino e o cliente processa mesmo sem foco e
+sem estar mapeado — por isso o caminho ⌨ funciona e o ◐ precisa pedir foco
+emprestado. O WayClick lê a lista de janelas pelo scripting do KWin (única coisa
+que enxerga janela Wayland) e os ids X11 direto do `_NET_CLIENT_LIST` via libX11.
 
 **Modo segurar** — esse precisa de um truque. O compositor agrega o estado dos
 botões por *seat*, então enquanto o botão físico está pressionado ele
@@ -258,6 +301,9 @@ sg input -c "python3 tests/t_multimouse.py"  # vários mouses, cada um clonado c
 python3 tests/t_fast.py 0.1                  # cliques emitidos x entregues a 10.000/s
 python3 tests/t_keymacro.py                  # teclas entregues, e nunca deixadas presas
 python3 tests/t_antiafk.py                   # amplitude do nudge na tela e deriva ao longo do tempo
+sg input -c "python3 tests/t_xinject.py"     # tecla numa janela X11, sem foco e depois minimizada
+sg input -c "python3 tests/t_target.py"      # o mesmo para alvo Wayland, pelo caminho do foco
+sg input -c "python3 tests/t_holdtime.py"    # duração da tecla, medida como um jogo consulta
 ```
 
 Eles abrem uma janela em tela cheia para contar o que realmente chega, então a

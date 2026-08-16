@@ -19,6 +19,8 @@ running as root.
 - **Global hotkey** that works even when the window is not focused
 - **Hold mode** — clicks only while you physically hold the mouse button
 - **Keyboard macro** — 122 keys, repeat or hold
+- **Send key to a window** — pick an open window and feed it a key; for X11
+  targets it arrives with no focus change, even minimized
 - **Anti-AFK** — nudges the pointer and puts it back, with zero drift
 - **Tray icon**, autostart, dark/light themes, English and Portuguese
 
@@ -108,8 +110,8 @@ wayclick --tray     # start hidden in the system tray
 wayclick --version
 ```
 
-The window has three boxes. **Click** and **Keyboard macro** are what runs, and
-both are checkable — enable one, the other, or both. **Trigger** is how it
+The window has four checkable boxes. **Click**, **Keyboard macro** and **Send
+key to a window** are what runs — enable any combination. **Trigger** is how it
 starts and stops. Anti-AFK sits on its own, outside Start/Stop.
 
 The menu bar has the rest: **File** starts, stops, hides to tray and quits;
@@ -165,6 +167,38 @@ any window. `Esc` always stops when the window is focused.
 **Sound feedback** — a short high beep when it starts, low when it stops, so you
 know the hotkey registered without looking.
 
+### Send key to a window
+
+Pick one of your open windows and WayClick feeds it a key on an interval —
+Space into a game every 60 s, for instance, while you keep working. The list
+shows every open window with its real icon and a marker for how the key will
+get there:
+
+| | |
+|---|---|
+| **⌨** | X11 window (Xwayland). The key is addressed to that window: your focus is never touched, and it works **even minimized**. |
+| **◐** | Pure Wayland window. There is no way to address it, so WayClick focuses it for ~40 ms, sends the key and hands focus back. |
+
+Measured against an X11 target running in its own process, with focus parked on
+another window the whole time: 3 of 3 delivered while unfocused, 6 more while
+minimized, 0 leaked into the focused window.
+
+If the window you picked is pure Wayland, the group shows a red notice. The way
+out is to reopen that program as an X11 client, which usually takes one
+environment variable:
+
+```bash
+SDL_VIDEODRIVER=x11 ./game          # SDL (most games)
+GDK_BACKEND=x11 ./app               # GTK
+QT_QPA_PLATFORM=xcb ./app           # Qt
+flatpak run --env=SDL_VIDEODRIVER=x11 org.example.App
+```
+
+Then it shows up as ⌨ and takes the key directly. Two honest caveats: an app
+that reads raw input may ignore synthetic X11 events, and this is keyboard
+only — clicks follow the cursor rather than focus, so aiming them at a window
+would mean warping your pointer.
+
 ### Anti-AFK
 
 Nudges the pointer a few pixels and puts it right back, every N seconds. It is
@@ -202,6 +236,15 @@ granularity alone cannot hit sub-millisecond timing.
 **Global hotkey** — reads `/dev/input/event*` directly, the only way to see keys
 that are not focused on your window. Keyboards created by remappers (keyd,
 kmonad, input-remapper) count as valid sources.
+
+**Per-window key** — Wayland gives input to whoever has focus and offers no way
+to address a surface; KWin's `fake_input`, the only injection protocol it
+implements, has no surface argument either. X11 is the opposite: `XSendEvent`
+carries a destination window and the client handles it while unfocused and
+unmapped, which is why the ⌨ path works and the ◐ one has to borrow focus.
+WayClick reads the window list from KWin scripting (the only thing that sees
+Wayland windows) and the X11 ids straight from `_NET_CLIENT_LIST` through
+libX11.
 
 **Hold mode** — this one needs a trick. The compositor tracks button state per
 *seat*, so while your physical button is held it **discards every click you
@@ -251,6 +294,9 @@ sg input -c "python3 tests/t_multimouse.py"  # several mice, each cloned with it
 python3 tests/t_fast.py 0.1                  # emitted vs. delivered clicks at 10,000/s
 python3 tests/t_keymacro.py                  # keys delivered, and never left stuck
 python3 tests/t_antiafk.py                   # nudge amplitude on screen and drift over time
+sg input -c "python3 tests/t_xinject.py"     # key into an X11 window, unfocused then minimized
+sg input -c "python3 tests/t_target.py"      # same for a Wayland target, through the focus path
+sg input -c "python3 tests/t_holdtime.py"    # press duration, measured the way a game polls it
 ```
 
 They open a fullscreen window to count what actually arrives, so expect the
