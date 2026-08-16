@@ -1,0 +1,1708 @@
+#!/usr/bin/env python3
+"""WayClick — autoclicker para Wayland via /dev/uinput (kernel), sem X11."""
+import fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil, struct
+import signal, subprocess, sys, tempfile, threading, time, wave
+
+try:
+    from PySide6.QtCore import Qt, QObject, QRectF, QTimer, QUrl, Signal
+    from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
+                               QKeySequence, QPainter, QPen, QPixmap,
+                               QShortcut)
+    from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
+                                   QFormLayout, QDoubleSpinBox, QGroupBox,
+                                   QHBoxLayout, QLabel, QMenu, QMenuBar,
+                                   QMessageBox, QPushButton, QSpinBox,
+                                   QSystemTrayIcon, QVBoxLayout, QWidget)
+except ImportError:
+    sys.exit("PySide6 is required.\n"
+             "  Fedora/RHEL:   sudo dnf install python3-pyside6\n"
+             "  Arch:          sudo pacman -S pyside6\n"
+             "  Debian/Ubuntu: sudo apt install python3-pyside6.qtwidgets "
+             "python3-pyside6.qtmultimedia\n"
+             "  any distro:    pip install --user PySide6")
+
+VERSION = "1.0.0"
+HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
+
+# ---------------------------------------------------------------- uinput ----
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT = 0x40045564, 0x40045565, 0x40045566
+UI_SET_MSCBIT = 0x40045568
+UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
+UI_GET_SYSNAME = (2 << 30) | (64 << 16) | (ord("U") << 8) | 44
+EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC = 0, 1, 2, 3, 4
+SYN_REPORT = 0
+BTN = {"Left": 0x110, "Right": 0x111, "Middle": 0x112}
+BTN_ALL = range(0x110, 0x118)           # left..task
+REL_ALL = (0, 1, 6, 7, 8, 9, 0x0b, 0x0c)  # x,y,hwheel,dial,wheel,misc,hi-res
+EVENT_FMT = "llHHi"                      # struct input_event
+EVENT_SIZE = struct.calcsize(EVENT_FMT)  # 24 em 64 bits, 16 em 32 bits
+DEV_NAME = b"wayclick-virtual-mouse"
+
+
+def _ior(nr, size):                      # _IOR('E', nr, size)
+    return (2 << 30) | (size << 16) | (ord("E") << 8) | nr
+
+
+EVIOCGNAME = _ior(0x06, 256)
+EVIOCGID = _ior(0x02, 8)                                     # struct input_id
+EVIOCGRAB = (1 << 30) | (4 << 16) | (ord("E") << 8) | 0x90   # _IOW('E',0x90,int)
+
+OWN_NODES = set()     # /dev/input/eventN dos nossos devices virtuais
+
+
+def eviocgbit(evtype, nbytes):
+    return _ior(0x20 + evtype, nbytes)
+
+
+def _ioctl_buf(fd, request, nbytes):
+    buf = bytearray(nbytes)
+    try:
+        fcntl.ioctl(fd, request, buf)
+    except OSError:
+        return bytearray(nbytes)
+    return buf
+
+
+def dev_name(fd):
+    return bytes(_ioctl_buf(fd, EVIOCGNAME, 256)).split(b"\x00", 1)[0]
+
+
+def dev_bits(fd, evtype, nbytes=96):
+    return _ioctl_buf(fd, eviocgbit(evtype, nbytes), nbytes)
+
+
+def has_bit(bits, code):
+    return code // 8 < len(bits) and bits[code // 8] >> (code % 8) & 1
+
+
+def uinput_node(fd):
+    """/dev/input/eventN do device que ACABAMOS de criar — é assim que a gente
+    se reconhece: o clone tem o mesmo nome do mouse real, filtrar por nome não
+    serviria."""
+    buf = bytearray(64)
+    try:
+        fcntl.ioctl(fd, UI_GET_SYSNAME, buf)
+    except OSError:
+        return None
+    sysname = bytes(buf).split(b"\x00", 1)[0].decode()
+    for p in glob.glob(f"/sys/class/input/{sysname}/event*"):
+        return "/dev/input/" + os.path.basename(p)
+    return None
+
+
+class VirtualMouse:
+    """Mouse virtual no kernel: o compositor Wayland o trata como hardware.
+
+    Se `clone_fd` for o mouse físico do usuário, o device virtual nasce com o
+    mesmo nome e os mesmos vendor/product/version. Isso importa de verdade: o
+    KDE guarda velocidade e perfil de aceleração por dispositivo
+    ([Libinput][vendor][product][nome] no kcminputrc), e o hwdb casa o DPI pelo
+    mesmo modalias — sem clonar, o ponteiro cai no default e a sensibilidade
+    parece ter "resetado" quando o mouse real está capturado.
+    """
+
+    def __init__(self, clone_fd=None):
+        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+        name, ident = DEV_NAME, (0x03, 0x1234, 0x5678, 1)
+        if clone_fd is not None:
+            name, ident = self._identity(clone_fd)
+        self.name = name
+        self.cloned = clone_fd is not None
+        if clone_fd is None or not self._copy_caps(clone_fd):
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_REL)
+            for code in BTN_ALL:
+                fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
+            for rel in REL_ALL:  # REL_X/Y fazem o libinput classificar como mouse
+                fcntl.ioctl(self.fd, UI_SET_RELBIT, rel)
+        dev = (struct.pack("80s", name)
+               + struct.pack("HHHH", *ident)
+               + struct.pack("i", 0)
+               + b"\x00" * (4 * 64 * 4))          # struct uinput_user_dev
+        os.write(self.fd, dev)
+        fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        self.node = self._own_node()
+        if self.node:
+            OWN_NODES.add(self.node)
+        time.sleep(0.4)  # deixa udev/libinput enumerarem o device
+
+    @staticmethod
+    def _identity(fd):
+        ident = struct.unpack("HHHH", bytes(_ioctl_buf(fd, EVIOCGID, 8)))
+        return dev_name(fd)[:79] or DEV_NAME, ident
+
+    def _copy_caps(self, fd):
+        """Espelha as capacidades do mouse físico (botões, eixos, MSC_SCAN)."""
+        copied = False
+        for evtype, setter, nbytes in ((EV_KEY, UI_SET_KEYBIT, 96),
+                                       (EV_REL, UI_SET_RELBIT, 8),
+                                       (EV_MSC, UI_SET_MSCBIT, 8)):
+            bits = dev_bits(fd, evtype, nbytes)
+            codes = [c for c in range(nbytes * 8) if has_bit(bits, c)]
+            if not codes:
+                continue
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, evtype)
+            for c in codes:
+                fcntl.ioctl(self.fd, setter, c)
+            copied = True
+        return copied
+
+    def _own_node(self):
+        return uinput_node(self.fd)
+
+    @staticmethod
+    def packet(code):
+        """press + SYN + release + SYN em um único write (4x mais barato)."""
+        ev = lambda t, c, v: struct.pack(EVENT_FMT, 0, 0, t, c, v)
+        return (ev(EV_KEY, code, 1) + ev(EV_SYN, SYN_REPORT, 0)
+                + ev(EV_KEY, code, 0) + ev(EV_SYN, SYN_REPORT, 0))
+
+    def _emit(self, etype, code, value):
+        os.write(self.fd, struct.pack(EVENT_FMT, 0, 0, etype, code, value))
+
+    def click(self, code):
+        os.write(self.fd, self.packet(code))
+
+    def move(self, dx, dy=0):
+        self._emit(EV_REL, 0, dx)
+        if dy:
+            self._emit(EV_REL, 1, dy)
+        self._emit(EV_SYN, SYN_REPORT, 0)
+
+    def close(self):
+        OWN_NODES.discard(self.node)
+        try:
+            fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+        except OSError:
+            pass
+        os.close(self.fd)
+
+
+# teclado completo para a macro (códigos de linux/input-event-codes.h).
+# Nomes em inglês de propósito: rótulo de tecla é o mesmo em qualquer idioma.
+KEYS = {
+    "Space": 57, "Enter": 28, "Tab": 15, "Backspace": 14, "Esc": 1,
+    "Delete": 111, "Insert": 110, "Home": 102, "End": 107,
+    "Page Up": 104, "Page Down": 109,
+    "Up": 103, "Down": 108, "Left": 105, "Right": 106,
+    "Left Shift": 42, "Right Shift": 54, "Left Ctrl": 29, "Right Ctrl": 97,
+    "Left Alt": 56, "Right Alt": 100, "Left Super": 125, "Right Super": 126,
+    "Caps Lock": 58, "Num Lock": 69, "Scroll Lock": 70, "Menu": 127,
+    "Print Screen": 99, "Pause": 119,
+    "A": 30, "B": 48, "C": 46, "D": 32, "E": 18, "F": 33, "G": 34, "H": 35,
+    "I": 23, "J": 36, "K": 37, "L": 38, "M": 50, "N": 49, "O": 24, "P": 25,
+    "Q": 16, "R": 19, "S": 31, "T": 20, "U": 22, "V": 47, "W": 17, "X": 45,
+    "Y": 21, "Z": 44,
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10,
+    "0": 11,
+    "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64, "F7": 65,
+    "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88,
+    "F13": 183, "F14": 184, "F15": 185, "F16": 186, "F17": 187, "F18": 188,
+    "F19": 189, "F20": 190, "F21": 191, "F22": 192, "F23": 193, "F24": 194,
+    "Numpad 0": 82, "Numpad 1": 79, "Numpad 2": 80, "Numpad 3": 81,
+    "Numpad 4": 75, "Numpad 5": 76, "Numpad 6": 77, "Numpad 7": 71,
+    "Numpad 8": 72, "Numpad 9": 73, "Numpad .": 83, "Numpad +": 78,
+    "Numpad -": 74, "Numpad *": 55, "Numpad /": 98, "Numpad Enter": 96,
+    "- (minus)": 12, "= (equal)": 13, "[": 26, "]": 27, "\\": 43,
+    "; (semicolon)": 39, "' (apostrophe)": 40, "` (grave)": 41,
+    ", (comma)": 51, ". (period)": 52, "/ (slash)": 53,
+    "Volume Up": 115, "Volume Down": 114, "Mute": 113,
+    "Play/Pause": 164, "Next Track": 163, "Previous Track": 165,
+}
+KB_NAME = b"wayclick-virtual-keyboard"
+
+
+class VirtualKeyboard:
+    """Teclado virtual no kernel, para a macro de teclas.
+
+    Declara todas as teclas de KEYS de uma vez, então trocar a tecla escolhida
+    não exige recriar o device.
+    """
+
+    def __init__(self):
+        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+        for code in set(KEYS.values()):
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
+        os.write(self.fd, struct.pack("80s", KB_NAME)
+                 + struct.pack("HHHH", 0x03, 0x1234, 0x5679, 1)
+                 + struct.pack("i", 0) + b"\x00" * (4 * 64 * 4))
+        fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        self.node = uinput_node(self.fd)
+        if self.node:
+            OWN_NODES.add(self.node)      # o watcher de atalho não pode nos ouvir
+        time.sleep(0.4)
+
+    @staticmethod
+    def packet(code, value):
+        return (struct.pack(EVENT_FMT, 0, 0, EV_KEY, code, value)
+                + struct.pack(EVENT_FMT, 0, 0, EV_SYN, SYN_REPORT, 0))
+
+    def tap(self, code):
+        os.write(self.fd, self.packet(code, 1) + self.packet(code, 0))
+
+    def set(self, code, down):
+        os.write(self.fd, self.packet(code, 1 if down else 0))
+
+    def close(self):
+        OWN_NODES.discard(self.node)
+        try:
+            fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+        except OSError:
+            pass
+        os.close(self.fd)
+
+
+class AntiAfk(threading.Thread):
+    """Move 1 pixel e volta, periodicamente.
+
+    Os dois movimentos vão separados por GAP de propósito: mandados no mesmo
+    instante, o compositor somaria +1 e -1 no mesmo quadro e o jogo não veria
+    deslocamento nenhum — que é justamente o que precisa ser visto para o
+    contador de inatividade zerar.
+
+    E o sentido inverte a cada ciclo. A aceleração do libinput escala cada
+    evento pela velocidade estimada, e a ida (depois de 1 s parado) recebe um
+    fator diferente da volta (50 ms depois), então elas não se anulam sozinhas.
+    Alternando o sentido, o resíduo de um ciclo cancela o do seguinte e a
+    posição fica presa entre dois valores em vez de derivar pela tela —
+    medido: 0,0000 px de deriva.
+
+    STEP é 4 e não 1 porque a aceleração encolhe o deslocamento: com o perfil
+    flat a -0,55 daqui, 1 unidade virou 0,402 px de tela, ou seja, nem um pixel
+    inteiro, e um jogo que lê coordenadas inteiras não veria movimento nenhum.
+    4 unidades dão ~3 px, o bastante para registrar em qualquer configuração e
+    ainda assim imperceptível, já que volta em 50 ms.
+    """
+    GAP = 0.05
+    STEP = 4
+
+    def __init__(self, mouse, seconds):
+        super().__init__(daemon=True)
+        self.mouse, self.seconds = mouse, max(seconds, 1)
+        self._stop = threading.Event()
+        self.count = 0
+
+    def run(self):
+        step = self.STEP
+        while not self._stop.wait(self.seconds):
+            try:
+                self.mouse.move(step)
+                stopping = self._stop.wait(self.GAP)
+                self.mouse.move(-step)
+                if stopping:
+                    return
+                self.count += 1
+                step = -step
+            except OSError:
+                return                      # device recriado/fechado
+
+    def stop(self):
+        self._stop.set()
+
+
+class KeyMacro(threading.Thread):
+    """Repete uma tecla no intervalo dado, ou a mantém pressionada."""
+
+    def __init__(self, kb, interval_ms, keycode, hold=False):
+        super().__init__(daemon=True)
+        self.kb, self.code, self.hold = kb, keycode, hold
+        self.interval = max(interval_ms, 1) / 1000.0
+        self._stop = threading.Event()
+        self.count = 0
+
+    def run(self):
+        try:
+            if self.hold:
+                self.kb.set(self.code, True)
+                self._stop.wait()
+            else:
+                nxt = time.perf_counter()
+                while not self._stop.is_set():
+                    self.kb.tap(self.code)
+                    self.count += 1
+                    nxt += self.interval
+                    rest = nxt - time.perf_counter()
+                    if rest > 0:
+                        self._stop.wait(rest)
+                    else:
+                        nxt = time.perf_counter()
+        except OSError:
+            pass
+        finally:
+            if self.hold:                   # nunca deixar tecla presa
+                try:
+                    self.kb.set(self.code, False)
+                except OSError:
+                    pass
+
+    def stop(self):
+        self._stop.set()
+
+
+class Clicker(threading.Thread):
+    """Loop de cliques com deadline absoluto.
+
+    Acima de ~1 kHz o sleep do SO (granularidade ~50-100 us) não dá conta, então
+    o loop dorme só o "grosso" do intervalo e queima os últimos SPIN_S em
+    busy-wait — é o que permite chegar em 0,1 ms (10.000 cliques/s).
+    """
+    SPIN_S = 0.0006  # busy-wait nos últimos 600 us
+
+    def __init__(self, mouse, interval_ms, button, limit=0):
+        super().__init__(daemon=True)
+        self.mouse, self.limit = mouse, limit
+        self.interval = max(interval_ms, 0.1) / 1000.0
+        # busy-wait curto: só o suficiente pra cobrir a granularidade do sleep
+        self.spin = min(self.SPIN_S, self.interval * 0.3)
+        self.packet = VirtualMouse.packet(button)
+        self._stop = threading.Event()
+        self.count = 0
+
+    def run(self):
+        try:  # ajuda a estabilizar o jitter; falha silenciosa sem privilégio
+            os.nice(-5)
+        except OSError:
+            pass
+        # o busy-wait segura a GIL; encurtar o switch interval mantém a UI e o
+        # atalho global respondendo enquanto clicamos em alta frequência
+        sys.setswitchinterval(0.002)
+        write, fd, pkt = os.write, self.mouse.fd, self.packet
+        clock, stop = time.perf_counter, self._stop
+        interval, spin = self.interval, self.spin
+        nxt = clock()
+        while not stop.is_set():
+            write(fd, pkt)
+            self.count += 1
+            if self.limit and self.count >= self.limit:
+                break
+            nxt += interval
+            rest = nxt - clock() - spin
+            if rest > 0:
+                stop.wait(rest)
+            while clock() < nxt:  # busy-wait final: precisão sub-ms
+                pass
+            if clock() - nxt > 0.05:  # atrasou demais (suspensão, carga): ressincroniza
+                nxt = clock()
+
+    def stop(self):
+        self._stop.set()
+
+
+# ------------------------------------------------------- hotkey global ------
+# Lê /dev/input/event* direto: é o único jeito de atalho global no Wayland
+# sem cooperação do compositor. Exige o usuário no grupo 'input'.
+KEYNAMES = {"F6": 64, "F7": 65, "F8": 66, "F9": 67, "F10": 68, "F11": 87,
+            "F12": 88, "Insert": 110, "Pause": 119, "ScrollLock": 70,
+            "KP_Add": 78, "KP_Sub": 74}
+KEY_ESC = 1
+BTN_TOOL_FINGER = 0x145
+
+
+def is_uinput_device(path):
+    """Devices criados via uinput (os nossos, os de outra instância, sobras)
+    ficam em /sys/devices/virtual/input/. Mouse USB fica sob o barramento e
+    mouse Bluetooth sob virtual/misc/uhid/, então nenhum real é excluído —
+    importante porque o nosso clone tem o mesmo nome do mouse do usuário."""
+    real = os.path.realpath(f"/sys/class/input/{os.path.basename(path)}/device")
+    return real.startswith("/sys/devices/virtual/input/")
+
+
+def is_pointer_shaped(fd):
+    return has_bit(dev_bits(fd, EV_KEY), BTN["Left"]) \
+        and has_bit(dev_bits(fd, EV_REL, 8), 0)
+
+
+def is_keyboard(f):
+    """Só teclados interessam. Devices uinput NÃO são descartados aqui: quem usa
+    keyd, kmonad ou input-remapper digita por um teclado virtual, e ele precisa
+    valer como fonte de atalho. Só o que é uinput E tem cara de ponteiro fica de
+    fora — esse é um clone do WayClick, e a 10 kHz custaria caro acompanhá-lo."""
+    if is_uinput_device(f.name) and is_pointer_shaped(f.fileno()):
+        return False
+    keys = dev_bits(f.fileno(), EV_KEY)
+    return has_bit(keys, KEY_ESC) or any(has_bit(keys, c)
+                                         for c in KEYNAMES.values())
+
+
+def has_mouse_caps(fd):
+    """Botão + eixo relativo, sem eixo absoluto (o que descarta touchpad)."""
+    keys, rels = dev_bits(fd, EV_KEY), dev_bits(fd, EV_REL, 8)
+    if not (has_bit(keys, BTN["Left"]) and has_bit(rels, 0)):
+        return False
+    return not has_bit(dev_bits(fd, EV_ABS, 8), 0) \
+        and not has_bit(keys, BTN_TOOL_FINGER)
+
+
+def is_mouse(f):
+    """Mouse físico."""
+    return not is_uinput_device(f.name) and has_mouse_caps(f.fileno())
+
+
+def is_mouse_any(f):
+    """Inclui ponteiros virtuais — quem usa remapeador de mouse só tem esses."""
+    return has_mouse_caps(f.fileno())
+
+
+def event_paths():
+    """/dev/input/event* em ordem numérica (event2 antes de event10)."""
+    paths = glob.glob("/dev/input/event*")
+    return sorted(paths, key=lambda p: int(re.sub(r"\D", "", p) or 0))
+
+
+def open_devices(match, only=None):
+    """Abre /dev/input/event* que passem em `match`. Devolve (abertos, negados).
+    `only` restringe a caminhos específicos (usado pra capturar só o mouse
+    escolhido, em vez de sequestrar todos os apontadores da máquina)."""
+    files, denied = [], 0
+    for path in event_paths():
+        if path in OWN_NODES or (only is not None and path not in only):
+            continue
+        try:
+            f = open(path, "rb", buffering=0)
+        except OSError:
+            denied += 1
+            continue
+        if match(f):
+            files.append(f)
+        else:
+            f.close()
+    return files, denied
+
+
+def list_mice():
+    """[(caminho, nome)] de todo mouse legível — qualquer marca, quantos forem."""
+    found = []
+    files = open_devices(is_mouse)[0] or open_devices(is_mouse_any)[0]
+    for f in files:
+        found.append((f.name, dev_name(f.fileno()).decode(errors="replace")
+                      or os.path.basename(f.name)))
+        f.close()
+    return found
+
+
+def input_access():
+    """(pode_ler, e_membro_do_grupo_input) — os dois divergem até relogar."""
+    can_read = any(os.access(p, os.R_OK)
+                   for p in glob.glob("/dev/input/event*"))
+    try:
+        gid = grp.getgrnam("input").gr_gid
+        user = pwd.getpwuid(os.getuid()).pw_name
+        member = gid in os.getgrouplist(user, os.getgid())
+    except (KeyError, OSError):
+        member = False
+    return can_read, member
+
+
+def reexec_with_input_group():
+    """Ganhar o grupo 'input' normalmente exige relogar. `sg` faz na hora, sem
+    senha, quando o usuário já é membro — então reexecutamos por baixo dele."""
+    if os.environ.get("WAYCLICK_SG") or not shutil.which("sg"):
+        return
+    can_read, member = input_access()
+    if can_read or not member:
+        return
+    env = dict(os.environ, WAYCLICK_SG="1")
+    cmd = shlex.join([sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+    try:
+        os.execvpe("sg", ["sg", "input", "-c", cmd], env)
+    except OSError:
+        pass
+
+
+class HotkeyWatcher(QObject):
+    pressed = Signal()
+    released = Signal()
+
+    def __init__(self, keycode):
+        super().__init__()
+        self.keycode = keycode
+        self._run = True
+        self.error = None
+        self.files, self.denied = open_devices(is_keyboard)
+        if not self.files:
+            self.error = ("sem acesso a /dev/input" if self.denied
+                          else "nenhum teclado encontrado")
+
+    @property
+    def ok(self):
+        return bool(self.files)
+
+    def start(self):
+        if self.files:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while self._run:
+            try:
+                r, _, _ = select.select(self.files, [], [], 0.5)
+            except (OSError, ValueError):
+                return
+            for f in r:
+                try:
+                    data = f.read(4096)
+                except OSError:
+                    continue
+                while data and len(data) >= EVENT_SIZE:
+                    _, _, etype, code, value = struct.unpack_from(EVENT_FMT, data)
+                    if etype == EV_KEY and code == self.keycode:
+                        if value == 1:
+                            self.pressed.emit()
+                        elif value == 0:
+                            self.released.emit()
+                    data = data[EVENT_SIZE:]
+
+    def set_key(self, keycode):
+        self.keycode = keycode
+
+    def stop(self):
+        self._run = False
+
+
+# --------------------------------------------------- segurar o botão --------
+class MouseHold(QObject):
+    """Modo "clicar enquanto segura": captura o mouse físico e o retransmite.
+
+    O compositor agrega o estado dos botões por seat, então enquanto o botão
+    físico está pressionado ele DESCARTA qualquer clique que a gente injete —
+    medido: 0 de 20. Por isso a captura (EVIOCGRAB): o compositor deixa de ver
+    o mouse real e passa a ver só o nosso, e nós repassamos tudo (movimento,
+    roda, outros botões) menos o botão-gatilho, que vira o autoclick.
+    """
+    pressed = Signal()
+    released = Signal()
+    failed = Signal(str)
+
+    def __init__(self, mouse, button_code, only=None):
+        super().__init__()
+        self.mouse, self.button = mouse, button_code
+        self.only = only              # captura só o mouse escolhido na UI
+        self.files = []
+        self._run = False
+        self._thread = None
+
+    def start(self):
+        files, denied = open_devices(is_mouse_any, self.only)
+        if not files:
+            self.failed.emit("no mouse found" if not denied
+                             else "no access to /dev/input")
+            return False
+        grabbed = []
+        for f in files:
+            try:
+                fcntl.ioctl(f, EVIOCGRAB, 1)
+                grabbed.append(f)
+            except OSError:
+                f.close()
+        if not grabbed:
+            self.failed.emit("could not grab the mouse")
+            return False
+        for f in files:
+            if f not in grabbed:
+                f.close()
+        self.files = grabbed
+        self._run = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def _loop(self):
+        out_fd, trigger = self.mouse.fd, self.button
+        while self._run:
+            try:
+                r, _, _ = select.select(self.files, [], [], 0.2)
+            except (OSError, ValueError):
+                break
+            for f in r:
+                try:
+                    data = f.read(4096)          # lote inteiro de uma vez
+                except OSError:
+                    continue
+                if not data:
+                    continue
+                keep = bytearray()
+                for i in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+                    _, _, etype, code, value = struct.unpack_from(EVENT_FMT, data, i)
+                    if etype == EV_KEY and code == trigger:
+                        if value == 1:
+                            self.pressed.emit()
+                        elif value == 0:
+                            self.released.emit()
+                        continue                 # gatilho não é repassado
+                    keep += data[i:i + EVENT_SIZE]
+                if keep:
+                    try:
+                        os.write(out_fd, bytes(keep))
+                    except OSError:
+                        pass
+        self._release()
+
+    def _release(self):
+        for f in self.files:
+            try:
+                fcntl.ioctl(f, EVIOCGRAB, 0)
+            except OSError:
+                pass
+            try:
+                f.close()
+            except OSError:
+                pass
+        self.files = []
+
+    def stop(self):
+        if not self._run:
+            return
+        self._run = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._release()
+
+
+# ------------------------------------------------------------------- som ----
+class Beeper:
+    """Dois blips curtos (agudo = ligou, grave = desligou). Sem arquivo externo:
+    os WAVs são sintetizados no primeiro uso."""
+    RATE = 44100
+
+    def __init__(self):
+        self.effects = {}
+        self.player = None
+        self.paths = {}
+        d = os.path.join(os.environ.get("XDG_RUNTIME_DIR")
+                         or tempfile.gettempdir(), f"wayclick-{os.getuid()}")
+        try:
+            os.makedirs(d, exist_ok=True)
+            for name, freq in (("on", 1046.5), ("off", 622.25)):
+                path = os.path.join(d, f"{name}.wav")
+                if not os.path.exists(path):
+                    self._write_wav(path, freq)
+                self.paths[name] = path
+        except OSError:
+            return
+        try:                     # QtMultimedia é pacote separado em algumas distros
+            from PySide6.QtCore import QUrl
+            from PySide6.QtMultimedia import QSoundEffect
+        except ImportError:
+            self.player = (shutil.which("paplay") or shutil.which("pw-play")
+                           or shutil.which("aplay"))
+            return
+        for name, path in self.paths.items():
+            eff = QSoundEffect()
+            eff.setSource(QUrl.fromLocalFile(path))
+            eff.setVolume(0.35)
+            self.effects[name] = eff
+
+    @classmethod
+    def _write_wav(cls, path, freq, ms=70):
+        n = int(cls.RATE * ms / 1000)
+        fade = int(cls.RATE * 0.006)      # rampa: sem ela o blip estala
+        frames = bytearray()
+        for i in range(n):
+            amp = min(1.0, i / fade, (n - i) / fade)
+            v = int(20000 * amp * math.sin(2 * math.pi * freq * i / cls.RATE))
+            frames += struct.pack("<h", v)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(cls.RATE)
+            w.writeframes(bytes(frames))
+
+    def play(self, name):
+        eff = self.effects.get(name)
+        if eff is not None:
+            eff.play()
+        elif self.player and name in self.paths:
+            subprocess.Popen([self.player, self.paths[name]],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ------------------------------------------------------------- idioma ------
+# Dicionário simples em vez de .ts/.qm: o app é um arquivo só, e assim quem for
+# traduzir para outro idioma só precisa copiar um bloco aqui.
+TRANSLATIONS = {
+    "pt_BR": {
+        "WayClick": "WayClick",
+        "File": "Arquivo", "Settings": "Configurações", "Help": "Ajuda",
+        "Theme": "Tema", "Language": "Idioma",
+        "System": "Sistema", "Dark": "Escuro", "Light": "Claro",
+        "Start": "Iniciar", "Stop": "Parar",
+        "Hide to tray": "Esconder na bandeja",
+        "Show window": "Mostrar janela", "Hide window": "Esconder janela",
+        "Quit": "Sair", "About": "Sobre",
+        "Project on GitHub": "Projeto no GitHub",
+        "Click": "Clique", "Keyboard macro": "Macro de teclado",
+        "Trigger": "Acionamento",
+        "Mouse:": "Mouse:", "Interval:": "Intervalo:", "Button:": "Botão:",
+        "Key:": "Tecla:", "Action:": "Ação:", "Mode:": "Modo:",
+        "Start delay:": "Atraso ao iniciar:",
+        "Auto-stop after:": "Parar sozinho após:",
+        "Global hotkey:": "Atalho global:",
+        "Left": "Esquerdo", "Right": "Direito", "Middle": "Meio",
+        "Repeat": "Repetir", "Hold": "Segurar",
+        "Hotkey toggles": "Atalho liga e desliga",
+        "Clicks while hotkey is held": "Age enquanto o atalho é segurado",
+        "Clicks while mouse button is held":
+            "Age enquanto o botão do mouse é segurado",
+        "never": "nunca", "Rescan mice": "Reprocurar mouses",
+        "Sound feedback on hotkey": "Som ao acionar o atalho",
+        "Start with system": "Iniciar com o sistema",
+        "Anti-AFK: nudge the cursor every":
+            "Anti-AFK: mexer o cursor a cada",
+        "Stopped": "Parado", "Starting in {n}s…": "Começa em {n}s…",
+        "Stopped (time is up)": "Parado (tempo esgotado)",
+        "RUNNING": "RODANDO", "ARMED — hold {btn} mouse button":
+            "ARMADO — segure o botão {btn} do mouse",
+        "held": "segurada", "nothing enabled": "nada habilitado",
+        "stops in {n}s": "para em {n}s", "anti-AFK": "anti-AFK",
+        "clicks/s": "cliques/s",
+        "Nothing to run: enable Click, Keyboard macro, or both.":
+            "Nada para executar: habilite Clique, Macro de teclado, ou os dois.",
+        "Move the cursor off this window before starting — otherwise it clicks "
+        "itself. That is what the {d}s start delay is for. {hk} toggles; Esc stops.":
+            "Tire o cursor desta janela antes de iniciar — senão ele clica em si "
+            "mesmo. É para isso que serve o atraso de {d}s. {hk} liga e desliga; "
+            "Esc para.",
+        "Hold mode: while armed, your {btn} mouse button is captured and turned "
+        "into the click stream — hold it to autoclick, release to stop. "
+        "{hk} arms/disarms; Esc disarms.":
+            "Modo segurar: enquanto armado, o botão {btn} do mouse é capturado e "
+            "vira o fluxo de cliques — segure para clicar, solte para parar. "
+            "{hk} arma e desarma; Esc desarma.",
+        "Interval between clicks: 1000 ms (1 click/s) down to 0.1 ms "
+        "(10,000 clicks/s). Lower = faster. Above a few thousand clicks/s the "
+        "target app may drop some. Closing this window leaves it running in the "
+        "tray — quit from the tray menu.":
+            "Intervalo entre cliques: de 1000 ms (1 clique/s) até 0,1 ms "
+            "(10.000 cliques/s). Menor = mais rápido. Acima de alguns milhares "
+            "de cliques/s o programa alvo pode descartar parte. Fechar esta "
+            "janela deixa o app na bandeja — para sair, use o menu da bandeja.",
+        "Global hotkey OFF: you are in the 'input' group but this session "
+        "started before that, so it has no access yet. Log out and back in, "
+        "or run:  sg input -c '{cmd}'":
+            "Atalho global DESLIGADO: você está no grupo 'input', mas esta "
+            "sessão começou antes disso e ainda não tem acesso. Saia e entre de "
+            "novo, ou rode:  sg input -c '{cmd}'",
+        "Global hotkey OFF (no access to /dev/input). Run this, then log out "
+        "and back in:\nsudo usermod -aG input $USER\nUntil then the hotkey "
+        "only works with this window focused.":
+            "Atalho global DESLIGADO (sem acesso a /dev/input). Rode isto e "
+            "depois saia e entre de novo:\nsudo usermod -aG input $USER\nAté lá "
+            "o atalho só funciona com esta janela em foco.",
+        "no mouse detected": "nenhum mouse detectado",
+        "Hold mode unavailable: {msg}": "Modo segurar indisponível: {msg}",
+        "no mouse found": "nenhum mouse encontrado",
+        "no access to /dev/input": "sem acesso a /dev/input",
+        "could not grab the mouse": "não foi possível capturar o mouse",
+        "Autoclicker for Wayland using /dev/uinput.":
+            "Autoclicker para Wayland usando /dev/uinput.",
+    },
+}
+LANGS = {"English": "en_US", "Português (BR)": "pt_BR"}
+LANG = "en_US"
+
+
+def _(text, **fmt):
+    out = TRANSLATIONS.get(LANG, {}).get(text, text)
+    return out.format(**fmt) if fmt else out
+
+
+def default_language():
+    loc = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
+           or os.environ.get("LANG") or "")
+    return "pt_BR" if loc.lower().startswith("pt") else "en_US"
+
+
+# --------------------------------------------------------------- tema ------
+THEMES = ("System", "Dark", "Light")
+_SYS = {}
+
+
+def _palette(spec):
+    from PySide6.QtGui import QPalette
+    pal = QPalette()
+    for role, color in spec.items():
+        if role != "_disabled":
+            pal.setColor(getattr(QPalette, role), QColor(color))
+    for role, color in spec.get("_disabled", {}).items():
+        pal.setColor(QPalette.Disabled, getattr(QPalette, role), QColor(color))
+    return pal
+
+
+DARK = {"Window": "#2e2e2e", "WindowText": "#e6e6e6", "Base": "#232323",
+        "AlternateBase": "#2e2e2e", "ToolTipBase": "#2e2e2e",
+        "ToolTipText": "#e6e6e6", "Text": "#e6e6e6", "Button": "#353535",
+        "ButtonText": "#e6e6e6", "BrightText": "#ff5555", "Link": "#4aa3f0",
+        "Highlight": "#2a7fd4", "HighlightedText": "#ffffff",
+        "PlaceholderText": "#8a8a8a",
+        "_disabled": {"Text": "#6f6f6f", "ButtonText": "#6f6f6f",
+                      "WindowText": "#6f6f6f"}}
+LIGHT = {"Window": "#f2f2f2", "WindowText": "#1b1b1b", "Base": "#ffffff",
+         "AlternateBase": "#ececec", "ToolTipBase": "#ffffdc",
+         "ToolTipText": "#1b1b1b", "Text": "#1b1b1b", "Button": "#e8e8e8",
+         "ButtonText": "#1b1b1b", "BrightText": "#c00000", "Link": "#0a58ca",
+         "Highlight": "#2a7fd4", "HighlightedText": "#ffffff",
+         "PlaceholderText": "#7a7a7a",
+         "_disabled": {"Text": "#9a9a9a", "ButtonText": "#9a9a9a",
+                       "WindowText": "#9a9a9a"}}
+
+
+def apply_theme(name):
+    """Fusion + paleta própria: o estilo nativo (Breeze e afins) ignora paleta,
+    então forçar tema exige trocar de estilo junto. 'System' devolve os dois."""
+    app = QApplication.instance()
+    if not app:
+        return
+    _SYS.setdefault("palette", QApplication.palette())
+    _SYS.setdefault("style", app.style().objectName())
+    if name == "Dark":
+        app.setStyle("Fusion"); app.setPalette(_palette(DARK))
+    elif name == "Light":
+        app.setStyle("Fusion"); app.setPalette(_palette(LIGHT))
+    else:
+        app.setStyle(_SYS["style"]); app.setPalette(_SYS["palette"])
+
+
+# ---------------------------------------------------------- ícone/tray ------
+STATE_COLORS = {"run": "#1a9e1a", "wait": "#c88000",
+                "armed": "#2a7fd4", "": "#8a8a8a"}
+
+
+def mouse_icon(state=""):
+    """Ícone desenhado em código — nada de arquivo externo pra empacotar."""
+    px = QPixmap(64, 64)
+    px.fill(Qt.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.Antialiasing)
+    color = QColor(STATE_COLORS.get(state, STATE_COLORS[""]))
+    ink = QColor("#0d0d0d")
+    p.setBrush(color)
+    p.setPen(QPen(ink, 5))
+    p.drawRoundedRect(QRectF(15, 5, 34, 54), 17, 19)   # corpo
+    p.setPen(QPen(ink, 4))
+    p.drawLine(17, 27, 47, 27)                          # separa os botões
+    p.setBrush(ink)
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(QRectF(29, 11, 6, 13), 3, 3)      # rodinha
+    p.end()
+    return QIcon(px)
+
+
+# ------------------------------------------------------------- autostart ----
+XDG_CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+AUTOSTART = os.path.join(XDG_CONFIG, "autostart", "wayclick.desktop")
+DESKTOP_ENTRY = """[Desktop Entry]
+Type=Application
+Name=WayClick
+Comment=Autoclicker for Wayland, using /dev/uinput
+Exec={exec}
+Icon=input-mouse
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+"""
+
+
+def autostart_enabled():
+    return os.path.exists(AUTOSTART)
+
+
+def set_autostart(on):
+    """Entrada XDG em ~/.config/autostart. Começa na bandeja: no login o app
+    já herda o grupo 'input', então não precisa do desvio pelo `sg`."""
+    if not on:
+        try:
+            os.remove(AUTOSTART)
+        except FileNotFoundError:
+            pass
+        return True
+    try:
+        os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+        cmd = shlex.join([sys.executable, os.path.abspath(__file__), "--tray"])
+        with open(AUTOSTART, "w") as fh:
+            fh.write(DESKTOP_ENTRY.format(exec=cmd))
+        return True
+    except OSError:
+        return False
+
+
+# ------------------------------------------------------------------ UI ------
+TIP_TEXT = ("Interval between clicks: 1000 ms (1 click/s) down to 0.1 ms "
+            "(10,000 clicks/s). Lower = faster. Above a few thousand clicks/s "
+            "the target app may drop some. Closing this window leaves it "
+            "running in the tray — quit from the tray menu.")
+MODES = {"Hotkey toggles": "toggle",
+         "Clicks while hotkey is held": "hotkey_hold",
+         "Clicks while mouse button is held": "mouse_hold"}
+CFG = os.path.join(XDG_CONFIG, "wayclick.json")
+
+
+class App(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._state = ""
+        self.mouse = None
+        self.keyboard = None
+        self.clicker = None
+        self.keymacro = None
+        self.antiafk = None
+        self.running = False
+
+        cfg = {}
+        # aproveita a config do nome antigo do projeto, se existir
+        old = os.path.join(XDG_CONFIG, "autoclick-wayland.json")
+        src = CFG if os.path.exists(CFG) else old
+        if os.path.exists(src):
+            try:
+                with open(src) as fh:
+                    cfg = json.load(fh)
+            except Exception:
+                pass
+
+        global LANG
+        LANG = cfg.get("language") or default_language()
+        self.theme = cfg.get("theme", "System")
+        apply_theme(self.theme)
+        self.setWindowTitle(_("WayClick"))
+
+        self.interval = QDoubleSpinBox()
+        self.interval.setRange(0.1, 1000.0)
+        self.interval.setDecimals(1)
+        self.interval.setSingleStep(1.0)
+        self.interval.setSuffix(" ms")
+        self.interval.setValue(cfg.get("interval_ms", 100.0))
+        self.rate = QLabel()
+        self.interval.valueChanged.connect(self._show_rate)
+        self.btn_sel = QComboBox()
+        for name, code in BTN.items():
+            self.btn_sel.addItem(_(name), name)
+        self.btn_sel.setCurrentIndex(
+            max(0, self.btn_sel.findData(cfg.get("button", "Left"))))
+        self.delay = QSpinBox(); self.delay.setRange(0, 10)
+        self.delay.setValue(cfg.get("delay", 3)); self.delay.setSuffix(" s")
+        self.duration = QSpinBox(); self.duration.setRange(0, 3600)
+        self.duration.setValue(cfg.get("duration", 0))
+        self.duration.setSuffix(" s")
+        self.duration.setSpecialValueText(_("never"))
+        self.dev = QComboBox()
+        self.dev.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.dev.setMinimumContentsLength(22)
+        self.refresh_btn = QPushButton("↻")
+        self.refresh_btn.setFixedWidth(30)
+        self.refresh_btn.setToolTip(_("Rescan mice"))
+        self.refresh_btn.clicked.connect(lambda: self.refresh_mice(keep=True))
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(self.dev, 1)
+        dev_row.addWidget(self.refresh_btn)
+        self._wanted_mouse = cfg.get("mouse_name")
+        self.refresh_mice()
+        self.dev.currentIndexChanged.connect(self._mouse_changed)
+
+        self.hk = QComboBox(); self.hk.addItems(KEYNAMES.keys())
+        self.hk.setCurrentText(cfg.get("hotkey", "F8"))
+        self.mode = QComboBox()
+        for label, key in MODES.items():
+            self.mode.addItem(_(label), key)
+        self.mode.setCurrentIndex(
+            max(0, self.mode.findData(cfg.get("mode", "toggle"))))
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.sound = QCheckBox(_("Sound feedback on hotkey"))
+        self.sound.setChecked(cfg.get("sound", True))
+        self.autostart = QCheckBox(_("Start with system"))
+        self.autostart.setChecked(autostart_enabled())
+        self.autostart.toggled.connect(self._toggle_autostart)
+
+        # --- macro de teclado ---
+        self.key_sel = QComboBox(); self.key_sel.addItems(KEYS.keys())
+        self.key_sel.setMaxVisibleItems(20)
+        self.key_sel.setCurrentText(cfg.get("key", "Space"))
+        self.key_interval = QDoubleSpinBox()
+        self.key_interval.setRange(1.0, 10000.0)
+        self.key_interval.setDecimals(0)
+        self.key_interval.setSingleStep(50.0)
+        self.key_interval.setSuffix(" ms")
+        self.key_interval.setValue(cfg.get("key_interval_ms", 200.0))
+        self.key_mode = QComboBox()
+        for label in ("Repeat", "Hold"):
+            self.key_mode.addItem(_(label), label)
+        self.key_mode.setCurrentIndex(
+            max(0, self.key_mode.findData(cfg.get("key_mode", "Repeat"))))
+        self.key_mode.currentIndexChanged.connect(
+            lambda: self.key_interval.setEnabled(
+                self.key_mode.currentData() == "Repeat"))
+        self.key_interval.setEnabled(self.key_mode.currentData() == "Repeat")
+
+        self._labels = []            # (widget, texto-fonte) para retraduzir
+        click_form = QFormLayout()
+        self._row(click_form, "Mouse:", dev_row)
+        self._row(click_form, "Interval:", self.interval)
+        click_form.addRow("", self.rate)
+        self._row(click_form, "Button:", self.btn_sel)
+        self.click_box = QGroupBox(_("Click"))
+        self.click_box.setCheckable(True)
+        self.click_box.setChecked(cfg.get("click_enabled", True))
+        self.click_box.setLayout(click_form)
+
+        key_form = QFormLayout()
+        self._row(key_form, "Key:", self.key_sel)
+        self._row(key_form, "Interval:", self.key_interval)
+        self._row(key_form, "Action:", self.key_mode)
+        self.key_box = QGroupBox(_("Keyboard macro"))
+        self.key_box.setCheckable(True)
+        self.key_box.setChecked(cfg.get("key_enabled", False))
+        self.key_box.setLayout(key_form)
+        self.key_box.toggled.connect(self._key_box_toggled)
+
+        form = QFormLayout()
+        self._row(form, "Mode:", self.mode)
+        self._row(form, "Start delay:", self.delay)
+        self._row(form, "Auto-stop after:", self.duration)
+        self._row(form, "Global hotkey:", self.hk)
+        box = QGroupBox(_("Trigger")); box.setLayout(form)
+        self.trigger_box = box
+
+        # --- anti-AFK (independente do Start) ---
+        self.afk = QCheckBox(_("Anti-AFK: nudge the cursor every"))
+        self.afk.setChecked(False)
+        self.afk_secs = QSpinBox(); self.afk_secs.setRange(1, 600)
+        self.afk_secs.setValue(cfg.get("afk_seconds", 1)); self.afk_secs.setSuffix(" s")
+        self.afk.toggled.connect(self._afk_toggled)
+        self.afk_secs.valueChanged.connect(self._afk_restart)
+        afk_row = QHBoxLayout()
+        afk_row.addWidget(self.afk)
+        afk_row.addWidget(self.afk_secs)
+        afk_row.addStretch()
+
+        self.status = QLabel(_("Stopped"))
+        self.status.setAlignment(Qt.AlignCenter)
+        self.btn = QPushButton(_("Start"))
+        self.btn.setMinimumHeight(46)
+        self.btn.clicked.connect(lambda: self.set_running(not self.running))
+
+        self.warn = QLabel(""); self.warn.setWordWrap(True)
+        self.warn.setStyleSheet("color:#c86000;font-size:11px;")
+        self.warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.tip = QLabel(_(TIP_TEXT))
+        self.tip.setWordWrap(True)
+        self.tip.setStyleSheet("color:#888;font-size:11px;")
+
+        checks = QHBoxLayout()
+        checks.addWidget(self.sound)
+        checks.addWidget(self.autostart)
+        checks.addStretch()
+
+        lay = QVBoxLayout(self)
+        lay.setMenuBar(self._build_menu())
+        lay.addWidget(self.tip)
+        lay.addWidget(self.click_box)
+        lay.addWidget(self.key_box)
+        lay.addWidget(box)
+        lay.addLayout(afk_row)
+        lay.addLayout(checks)
+        lay.addWidget(self.status)
+        lay.addWidget(self.btn)
+        lay.addWidget(self.warn)
+        self.resize(430, 440)
+        self.setWindowIcon(mouse_icon())
+        self._show_rate()
+        self._paint_status()
+
+        # atalho global
+        self.watcher = HotkeyWatcher(KEYNAMES[self.hk.currentText()])
+        self.watcher.pressed.connect(self.on_press)
+        self.watcher.released.connect(self.on_release)
+        self.watcher.start()
+        self.hk.currentTextChanged.connect(self.on_hotkey_change)
+
+        # fallback só com a janela em foco; desligado quando o global funciona,
+        # senão a mesma tecla dispararia duas vezes e se anularia
+        self.local_sc = QShortcut(QKeySequence(self.hk.currentText()), self)
+        self.local_sc.setContext(Qt.ApplicationShortcut)
+        self.local_sc.activated.connect(lambda: self.set_running(not self.running))
+        self.local_sc.setEnabled(not self.watcher.ok)
+        QShortcut(QKeySequence("Esc"), self).activated.connect(
+            lambda: self.set_running(False))
+
+        self.countdown = QTimer(self); self.countdown.setInterval(1000)
+        self.countdown.timeout.connect(self._tick)
+        self._left = 0
+        self.autostop = QTimer(self); self.autostop.setInterval(1000)
+        self.autostop.timeout.connect(self._tick_autostop)
+        self._remain = 0
+
+        self.beeper = Beeper()
+        self.holder = None      # MouseHold, só no modo "mouse_hold"
+        self._build_tray()
+
+        # cria o mouse virtual já no início: o UI_DEV_CREATE precisa de ~0,4 s
+        # de settle e travaria a UI se fosse feito no clique de Start
+        self.ensure_mouse()
+
+        if not self.watcher.ok:
+            member = input_access()[1]
+            if member:
+                self.warn.setText(_(
+                    "Global hotkey OFF: you are in the 'input' group but this "
+                    "session started before that, so it has no access yet. "
+                    "Log out and back in, or run:  sg input -c '{cmd}'",
+                    cmd=f"python3 {os.path.abspath(__file__)}"))
+            else:
+                self.warn.setText(_(
+                    "Global hotkey OFF (no access to /dev/input). Run this, "
+                    "then log out and back in:\nsudo usermod -aG input $USER\n"
+                    "Until then the hotkey only works with this window "
+                    "focused."))
+        self._hint()
+
+    # ---------------------------------------------------------- helpers --
+    def _rate_str(self):
+        cps = 1000.0 / self.interval.value()
+        n = f"{cps:,.0f}" if cps >= 10 else f"{cps:.1f}"
+        return f"{n} " + _("clicks/s")
+
+    def _show_rate(self):
+        self.rate.setText("= " + self._rate_str())
+        self.rate.setStyleSheet("color:#7a7a7a;font-size:11px;")
+
+    def _hint(self):
+        if self.warn.text() and not getattr(self, "_hinted", False):
+            return
+        self._hinted = True
+        hk, btn = self.hk.currentText(), self.btn_sel.currentText()
+        if self.mode_key() == "mouse_hold":
+            self.warn.setText(_(
+                "Hold mode: while armed, your {btn} mouse button is captured "
+                "and turned into the click stream — hold it to autoclick, "
+                "release to stop. {hk} arms/disarms; Esc disarms.",
+                btn=btn.lower(), hk=hk))
+        else:
+            self.warn.setText(_(
+                "Move the cursor off this window before starting — otherwise "
+                "it clicks itself. That is what the {d}s start delay is for. "
+                "{hk} toggles; Esc stops.", d=self.delay.value(), hk=hk))
+
+    # -------------------------------------------------------- menu/i18n --
+    def _row(self, form, text, widget):
+        lbl = QLabel(_(text))
+        self._labels.append((lbl, text))
+        form.addRow(lbl, widget)
+        return lbl
+
+    def _build_menu(self):
+        bar = QMenuBar()
+        self.m_file = bar.addMenu(_("File"))
+        self.act_run = self.m_file.addAction(_("Start"))
+        self.act_run.triggered.connect(lambda: self.set_running(not self.running))
+        self.act_hide = self.m_file.addAction(_("Hide to tray"))
+        self.act_hide.triggered.connect(self.hide)
+        self.m_file.addSeparator()
+        self.act_quit = self.m_file.addAction(_("Quit"))
+        self.act_quit.triggered.connect(QApplication.instance().quit)
+
+        self.m_set = bar.addMenu(_("Settings"))
+        self.m_theme = self.m_set.addMenu(_("Theme"))
+        self.theme_acts = {}
+        for name in THEMES:
+            act = self.m_theme.addAction(_(name))
+            act.setCheckable(True)
+            act.triggered.connect(lambda _c=False, n=name: self._set_theme(n))
+            self.theme_acts[name] = act
+        self.m_lang = self.m_set.addMenu(_("Language"))
+        self.lang_acts = {}
+        for label, code in LANGS.items():
+            act = self.m_lang.addAction(label)     # nome do idioma não traduz
+            act.setCheckable(True)
+            act.triggered.connect(lambda _c=False, x=code: self._set_language(x))
+            self.lang_acts[code] = act
+        self.m_set.addSeparator()
+        self.act_sound = self.m_set.addAction(_("Sound feedback on hotkey"))
+        self.act_sound.setCheckable(True)
+        self.act_sound.toggled.connect(self.sound.setChecked)
+        self.sound.toggled.connect(self.act_sound.setChecked)
+        self.act_auto = self.m_set.addAction(_("Start with system"))
+        self.act_auto.setCheckable(True)
+        self.act_auto.toggled.connect(self.autostart.setChecked)
+        self.autostart.toggled.connect(self.act_auto.setChecked)
+
+        for n, act in self.theme_acts.items():
+            act.setChecked(n == self.theme)
+        for c, act in self.lang_acts.items():
+            act.setChecked(c == LANG)
+        self.act_sound.setChecked(self.sound.isChecked())
+        self.act_auto.setChecked(self.autostart.isChecked())
+
+        self.m_help = bar.addMenu(_("Help"))
+        self.act_site = self.m_help.addAction(_("Project on GitHub"))
+        self.act_site.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(HOMEPAGE)))
+        self.m_help.addSeparator()
+        self.act_about = self.m_help.addAction(_("About"))
+        self.act_about.triggered.connect(self._about)
+        return bar
+
+    def _set_theme(self, name):
+        self.theme = name
+        for n, act in self.theme_acts.items():
+            act.setChecked(n == name)
+        apply_theme(name)
+
+    def _set_language(self, code):
+        global LANG
+        LANG = code
+        for c, act in self.lang_acts.items():
+            act.setChecked(c == code)
+        self.retranslate()
+
+    def _about(self):
+        QMessageBox.about(
+            self, _("About"),
+            f"<b>WayClick {VERSION}</b><br>"
+            f"{_('Autoclicker for Wayland using /dev/uinput.')}<br><br>"
+            f'<a href="{HOMEPAGE}">{HOMEPAGE}</a>')
+
+    @staticmethod
+    def _retext(combo, labels):
+        """Retraduz os itens sem mexer na seleção (o valor vive no userData)."""
+        keep = combo.currentIndex()
+        combo.blockSignals(True)
+        for i, src in enumerate(labels):
+            combo.setItemText(i, _(src))
+        combo.setCurrentIndex(keep)
+        combo.blockSignals(False)
+
+    def retranslate(self):
+        self.setWindowTitle(_("WayClick"))
+        for lbl, src in self._labels:
+            lbl.setText(_(src))
+        self.click_box.setTitle(_("Click"))
+        self.key_box.setTitle(_("Keyboard macro"))
+        self.trigger_box.setTitle(_("Trigger"))
+        self.afk.setText(_("Anti-AFK: nudge the cursor every"))
+        self.sound.setText(_("Sound feedback on hotkey"))
+        self.autostart.setText(_("Start with system"))
+        self.refresh_btn.setToolTip(_("Rescan mice"))
+        self.duration.setSpecialValueText(_("never"))
+        self.tip.setText(_(TIP_TEXT))
+        self._retext(self.mode, list(MODES.keys()))
+        self._retext(self.btn_sel, list(BTN.keys()))
+        self._retext(self.key_mode, ["Repeat", "Hold"])
+        self.m_file.setTitle(_("File"))
+        self.m_set.setTitle(_("Settings"))
+        self.m_theme.setTitle(_("Theme"))
+        self.m_lang.setTitle(_("Language"))
+        self.m_help.setTitle(_("Help"))
+        self.act_hide.setText(_("Hide to tray"))
+        self.act_quit.setText(_("Quit"))
+        self.act_about.setText(_("About"))
+        self.act_site.setText(_("Project on GitHub"))
+        self.act_sound.setText(_("Sound feedback on hotkey"))
+        self.act_auto.setText(_("Start with system"))
+        for name, act in self.theme_acts.items():
+            act.setText(_(name))
+        self.btn.setText(_("Stop") if self.running else _("Start"))
+        self.act_run.setText(_("Stop") if self.running else _("Start"))
+        self.warn.setText("")
+        self._hinted = False
+        self._hint()
+        self.refresh_mice(keep=True)
+        self._show_rate()
+        self._show_status()
+        self._sync_tray()
+
+    # ------------------------------------------------------------- tray --
+    def _build_tray(self):
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(mouse_icon(), self)
+        menu = QMenu()
+        self.act_toggle = QAction(_("Start"), self)
+        self.act_toggle.triggered.connect(
+            lambda: self.set_running(not self.running))
+        self.act_window = QAction(_("Hide window"), self)
+        self.act_window.triggered.connect(self._toggle_window)
+        quit_act = QAction(_("Quit"), self)
+        quit_act.triggered.connect(QApplication.instance().quit)
+        menu.addAction(self.act_toggle)
+        menu.addSeparator()
+        menu.addAction(self.act_window)
+        menu.addAction(quit_act)
+        # a janela fechada pelo X só esconde e não avisa ninguém; atualizar os
+        # rótulos na abertura do menu evita ter que sobrescrever closeEvent
+        menu.aboutToShow.connect(self._sync_tray)
+        self.tray.setContextMenu(menu)
+        self.menu = menu
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+        self._sync_tray()
+        # com a bandeja ativa, fechar a janela só esconde; sair é pelo menu
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._toggle_window()
+
+    def _toggle_window(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        self._sync_tray()
+
+    def _sync_tray(self):
+        if not getattr(self, "tray", None):   # _paint_status roda antes da tray
+            return
+        state = getattr(self, "_state", "")
+        label = {"run": _("RUNNING").capitalize(), "wait": _("Starting in {n}s…", n=""),
+                 "armed": _("ARMED — hold {btn} mouse button",
+                            btn=self.btn_sel.currentText().lower())
+                 }.get(state, _("Stopped"))
+        self.tray.setIcon(mouse_icon(state))
+        self.tray.setToolTip(f"WayClick — {label}")
+        self.act_toggle.setText(_("Stop") if self.running else _("Start"))
+        self.act_window.setText(_("Hide window") if self.isVisible()
+                                else _("Show window"))
+
+    def _toggle_autostart(self, on):
+        if not set_autostart(on):
+            self.warn.setText("Could not write " + AUTOSTART)
+
+    def mode_key(self):
+        return self.mode.currentData()
+
+    def _mode_changed(self, _text):
+        self.set_running(False)
+        self.warn.setText("")
+        self._hinted = False
+        self._hint()
+
+    def _beep(self, which):
+        if self.sound.isChecked():
+            self.beeper.play(which)
+
+    def _paint_status(self):
+        color = STATE_COLORS.get(getattr(self, "_state", ""), STATE_COLORS[""])
+        self.status.setStyleSheet(
+            f"font-size:17px;font-weight:bold;color:{color};padding:10px;")
+        self._sync_tray()
+
+    # ------------------------------------------------------------ mouses --
+    def refresh_mice(self, keep=False):
+        """Lista todos os mouses legíveis. Qualquer marca/quantidade serve."""
+        want = self.selected_mouse()[1] if keep else self._wanted_mouse
+        self.dev.blockSignals(True)
+        self.dev.clear()
+        mice = list_mice()
+        for path, name in mice:
+            self.dev.addItem(f"{name}  ({os.path.basename(path)})", (path, name))
+        if not mice:
+            self.dev.addItem(_("no mouse detected"), None)
+        idx = next((i for i, (_, n) in enumerate(mice) if n == want), 0)
+        self.dev.setCurrentIndex(idx)
+        self.dev.blockSignals(False)
+        self.dev.setEnabled(bool(mice))
+        return mice
+
+    def selected_mouse(self):
+        data = self.dev.currentData()
+        return data if data else (None, None)
+
+    def _mouse_changed(self, _idx):
+        """Trocar de mouse recria o device virtual: a identidade clonada tem que
+        ser a do mouse que vai ser capturado, senão a sensibilidade não bate."""
+        self.set_running(False)
+        self._wanted_mouse = self.selected_mouse()[1]
+        if self.antiafk:            # a thread guarda o fd antigo
+            self.antiafk.stop()
+            self.antiafk = None
+        if self.mouse:
+            self.mouse.close()
+            self.mouse = None
+        self.ensure_mouse()
+        self._afk_restart()
+
+    def ensure_mouse(self):
+        if self.mouse is not None:
+            return True
+        # clona o mouse escolhido para herdar velocidade/perfil de aceleração
+        # que o usuário configurou; sem mouse acessível, cai no genérico
+        path = self.selected_mouse()[0]
+        clone, _ = open_devices(is_mouse_any if path else is_mouse,
+                                [path] if path else None)
+        try:
+            self.mouse = VirtualMouse(clone[0].fileno() if clone else None)
+        except (PermissionError, OSError) as e:
+            self.warn.setText(f"/dev/uinput failed: {e}\n"
+                              "sudo usermod -aG input $USER  (then re-login)")
+            return False
+        finally:
+            for f in clone:
+                f.close()
+        return True
+
+    # ------------------------------------------------------------ estado --
+    def set_running(self, on):
+        """running = ligado/armado. No modo "segurar", clicar de fato só
+        acontece com o botão do mouse pressionado."""
+        if on == self.running:
+            return
+        if on:
+            if not self.ensure_mouse():
+                return
+            if not (self.click_box.isChecked() or self.key_box.isChecked()):
+                self.warn.setText(_("Nothing to run: enable Click, Keyboard macro, or both."))
+                return
+            self.running = True
+            self.btn.setText(_("Stop"))
+            self.act_run.setText(_("Stop"))
+            self._beep("on")
+            self._left = self.delay.value()
+            if self._left:
+                self._state = "wait"
+                self.status.setText(_("Starting in {n}s…", n=self._left))
+                self.countdown.start()
+            else:
+                self._engage()
+        else:
+            self.running = False
+            self.countdown.stop()
+            self.autostop.stop()
+            self._stop_clicker()
+            if self.holder:
+                self.holder.stop()
+                self.holder = None
+            self._state = ""
+            self._show_status()
+            self.btn.setText(_("Start"))
+            self.act_run.setText(_("Start"))
+            self._beep("off")
+        self._paint_status()
+
+    def _tick(self):
+        self._left -= 1
+        if self._left > 0:
+            self.status.setText(_("Starting in {n}s…", n=self._left))
+        else:
+            self.countdown.stop()
+            self._engage()
+
+    def _engage(self):
+        """Fim do atraso: sai clicando, ou arma a captura do botão do mouse."""
+        self._remain = self.duration.value()
+        if self._remain:
+            self.autostop.start()
+        if self.mode_key() == "mouse_hold":
+            self._arm_hold()
+        else:
+            self._start_clicking()
+
+    def _arm_hold(self):
+        path = self.selected_mouse()[0]
+        self.holder = MouseHold(self.mouse, BTN[self.btn_sel.currentData()],
+                                only=[path] if path else None)
+        self.holder.pressed.connect(self._start_clicking)
+        self.holder.released.connect(self._hold_released)
+        self.holder.failed.connect(self._hold_failed)
+        if not self.holder.start():
+            self.holder = None
+            return
+        self._state = "armed"
+        self._show_status()
+        self._paint_status()
+
+    def _hold_failed(self, msg):
+        self.warn.setText(_("Hold mode unavailable: {msg}", msg=_(msg)))
+        self.set_running(False)
+
+    def _hold_released(self):
+        self._stop_clicker()
+        if self.running:
+            self._state = "armed"
+            self._show_status()
+            self._paint_status()
+
+    def _start_clicking(self):
+        """Liga o que estiver habilitado: cliques, macro de teclado, ou os dois."""
+        if self.clicker or self.keymacro:
+            return
+        if self.click_box.isChecked():
+            self.clicker = Clicker(self.mouse, self.interval.value(),
+                                   BTN[self.btn_sel.currentData()])
+            self.clicker.start()
+        if self.key_box.isChecked() and self.ensure_keyboard():
+            self.keymacro = KeyMacro(self.keyboard, self.key_interval.value(),
+                                     KEYS[self.key_sel.currentText()],
+                                     self.key_mode.currentData() == "Hold")
+            self.keymacro.start()
+        self._state = "run"
+        self._show_status()
+        self._paint_status()
+
+    def _stop_clicker(self):
+        if self.clicker:
+            self.clicker.stop()
+            self.clicker = None
+        if self.keymacro:
+            self.keymacro.stop()
+            self.keymacro = None
+
+    # ---------------------------------------------------------- teclado --
+    def ensure_keyboard(self):
+        if self.keyboard is None:
+            try:
+                self.keyboard = VirtualKeyboard()
+            except OSError as e:
+                self.warn.setText(f"virtual keyboard failed: {e}")
+                return False
+        return True
+
+    def _key_box_toggled(self, on):
+        """Cria/destroi o device só quando a macro é ligada — evita deixar um
+        teclado virtual pendurado na sessão de quem não usa a função."""
+        if on:
+            self.ensure_keyboard()
+        else:
+            self._stop_clicker() if self.keymacro else None
+            if self.keyboard:
+                self.keyboard.close()
+                self.keyboard = None
+
+    # ---------------------------------------------------------- anti-afk --
+    def _afk_toggled(self, on):
+        if self.antiafk:
+            self.antiafk.stop()
+            self.antiafk = None
+        if on and self.ensure_mouse():
+            self.antiafk = AntiAfk(self.mouse, self.afk_secs.value())
+            self.antiafk.start()
+        self._show_status()
+
+    def _afk_restart(self, _v=None):
+        if self.afk.isChecked():
+            self._afk_toggled(True)
+
+    def _show_status(self):
+        state = getattr(self, "_state", "")
+        if state == "armed":
+            txt = "◆ " + _("ARMED — hold {btn} mouse button",
+                           btn=self.btn_sel.currentText().lower())
+        elif state == "run":
+            parts = []
+            if self.clicker:
+                parts.append(self._rate_str())
+            if self.keymacro:
+                parts.append(f"{self.key_sel.currentText()} "
+                             + (_("held") if self.keymacro.hold
+                                else f"{self.key_interval.value():.0f} ms"))
+            txt = ("● " + _("RUNNING") + "  ("
+                   + " + ".join(parts or [_("nothing enabled")]) + ")")
+        else:
+            txt = _("Stopped")
+        if self._remain:
+            txt += "  —  " + _("stops in {n}s", n=self._remain)
+        if self.antiafk:
+            txt += "   ⟲ " + _("anti-AFK")
+        self.status.setText(txt)
+
+    def _tick_autostop(self):
+        self._remain -= 1
+        if self._remain <= 0:
+            self.set_running(False)
+            self.status.setText(_("Stopped (time is up)"))
+        else:
+            self._show_status()
+
+    # ------------------------------------------------------------ atalho --
+    def on_press(self):
+        if self.mode_key() == "hotkey_hold":
+            self.set_running(True)
+        else:
+            self.set_running(not self.running)
+
+    def on_release(self):
+        if self.mode_key() == "hotkey_hold":
+            self.set_running(False)
+
+    def on_hotkey_change(self, text):
+        self.watcher.set_key(KEYNAMES[text])
+        self.local_sc.setKey(QKeySequence(text))
+        self.local_sc.setEnabled(not self.watcher.ok)
+
+    # Limpeza via aboutToQuit e não closeEvent: sobrescrever closeEvent faz o
+    # shiboken embrulhar o QCloseEvent, o que segfaulta no PySide6 + Python
+    # 3.15rc do Fedora 45 quando a janela é fechada pelo botão do compositor.
+    def cleanup(self):
+        if getattr(self, "_cleaned", False):
+            return
+        self._cleaned = True
+        self.set_running(False)
+        if self.antiafk:
+            self.antiafk.stop()
+            self.antiafk = None
+        self.watcher.stop()
+        if self.keyboard:
+            self.keyboard.close()
+            self.keyboard = None
+        if self.mouse:
+            self.mouse.close()
+            self.mouse = None
+        try:
+            with open(CFG, "w") as fh:
+                json.dump({"interval_ms": self.interval.value(),
+                           "button": self.btn_sel.currentData(),
+                           "delay": self.delay.value(),
+                           "duration": self.duration.value(),
+                           "hotkey": self.hk.currentText(),
+                           "mode": self.mode_key(),
+                           "sound": self.sound.isChecked(),
+                           "mouse_name": self.selected_mouse()[1],
+                           "click_enabled": self.click_box.isChecked(),
+                           "key_enabled": self.key_box.isChecked(),
+                           "key": self.key_sel.currentText(),
+                           "key_interval_ms": self.key_interval.value(),
+                           "key_mode": self.key_mode.currentData(),
+                           "afk_seconds": self.afk_secs.value(),
+                           "theme": self.theme,
+                           "language": LANG}, fh)
+        except Exception:
+            pass
+
+
+USAGE = f"""WayClick {VERSION} — autoclicker for Wayland, via /dev/uinput
+
+usage: wayclick [--tray] [--version] [--help]
+
+  --tray      start hidden in the system tray
+  --version   print the version and exit
+  --help      show this help and exit
+
+{HOMEPAGE}"""
+
+
+if __name__ == "__main__":
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print(USAGE)
+        sys.exit(0)
+    if "--version" in sys.argv[1:] or "-V" in sys.argv[1:]:
+        print(f"WayClick {VERSION}")
+        sys.exit(0)
+    reexec_with_input_group()   # antes do Qt: pode substituir o processo
+    app = QApplication(sys.argv)
+    w = App()
+    app.aboutToQuit.connect(w.cleanup)
+
+    # Ctrl+C no terminal: sem isso o sinal só é visto quando o interpretador
+    # volta a rodar bytecode, e o KeyboardInterrupt estoura no meio da limpeza
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    wake = QTimer()
+    wake.setInterval(200)
+    wake.timeout.connect(lambda: None)   # devolve o controle ao Python
+    wake.start()
+
+    if "--tray" in sys.argv[1:] and w.tray:
+        w.hide()                          # início silencioso, só a bandeja
+        w._sync_tray()
+    else:
+        w.show()
+    sys.exit(app.exec())
