@@ -53,6 +53,9 @@ modprobe uinput >/dev/null 2>&1 || true
 if [ -x /usr/bin/update-desktop-database ]; then
     update-desktop-database -q /usr/share/applications || true
 fi
+if [ -x /usr/bin/gtk-update-icon-cache ]; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
 echo "WayClick: add yourself to the 'input' group if you have not yet:"
 echo "  sudo usermod -aG input \$USER    (then log out and back in)"
 POST

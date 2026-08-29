@@ -1,6 +1,7 @@
 post_install() {
     udevadm control --reload-rules >/dev/null 2>&1 || true
     modprobe uinput >/dev/null 2>&1 || true
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
     echo "WayClick: add yourself to the 'input' group if you have not yet:"
     echo "  sudo usermod -aG input \$USER    (then log out and back in)"
 }

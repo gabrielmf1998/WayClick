@@ -45,7 +45,7 @@ Grab one from [the latest release](https://github.com/gabrielmf1998/WayClick/rel
 |---|---|
 | **Fedora, RHEL** | `sudo dnf install ./wayclick-*.noarch.rpm` |
 | **Debian, Ubuntu** | `sudo apt install ./wayclick_*_all.deb` |
-| **Arch, Manjaro** | `makepkg -si` from [`packaging/PKGBUILD`](packaging/PKGBUILD) |
+| **Arch, Manjaro** | `sudo pacman -U ./wayclick-*-any.pkg.tar.zst` |
 | **Anything else** | `chmod +x WayClick-*.AppImage && ./WayClick-*.AppImage` |
 
 The packages ship the udev rule, so all that is left is joining the `input`
@@ -351,8 +351,9 @@ Use it where automation is allowed. Plenty of online games ban input automation.
 ```bash
 bash packaging/build-rpm.sh        # needs rpm-build
 bash packaging/build-deb.sh        # needs only ar and tar, no dpkg
+bash packaging/build-pacman.sh     # needs bsdtar, builds off Arch too
 bash packaging/build-appimage.sh   # downloads a portable Python and Qt
-makepkg -p packaging/PKGBUILD      # on Arch
+makepkg -p packaging/PKGBUILD      # the from-source route, on Arch
 ```
 
 Everything lands in `dist/`. A tag push builds all of them on CI and attaches

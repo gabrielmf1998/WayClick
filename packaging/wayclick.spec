@@ -52,6 +52,8 @@ python3 -c "import ast,sys; ast.parse(open('wayclick.py').read())"
 %post
 /usr/sbin/udevadm control --reload-rules >/dev/null 2>&1 || :
 /usr/sbin/modprobe uinput >/dev/null 2>&1 || :
+/usr/bin/gtk-update-icon-cache -f -t %{_datadir}/icons/hicolor >/dev/null 2>&1 || :
+/usr/bin/update-desktop-database %{_datadir}/applications >/dev/null 2>&1 || :
 
 %files
 %license LICENSE

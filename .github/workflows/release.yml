@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install build deps
-        run: dnf install -y rpm-build binutils tar gzip desktop-file-utils python3 findutils
+        run: dnf install -y rpm-build binutils tar gzip zstd bsdtar desktop-file-utils python3 findutils
       - run: bash packaging/build-rpm.sh
       - run: bash packaging/build-deb.sh
+      - run: bash packaging/build-pacman.sh
       - uses: actions/upload-artifact@v4
-        with: { name: rpm-deb, path: dist/* }
+        with: { name: distro-packages, path: dist/* }
 
   appimage:
     runs-on: ubuntu-latest

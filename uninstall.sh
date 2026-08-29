@@ -38,4 +38,6 @@ else
     echo "Use --purge to remove those as well."
 fi
 update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
+rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache" 2>/dev/null || true
+kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
 echo "Done."

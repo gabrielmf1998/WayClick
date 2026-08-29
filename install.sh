@@ -149,7 +149,19 @@ Terminal=false
 Categories=Utility;
 StartupNotify=false
 EOF
+    refresh_caches
+}
+
+refresh_caches() {
+    # sem isto o KDE continua mostrando o ícone antigo depois de atualizar:
+    # ele guarda o ícone em cache e não repara que o arquivo mudou
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    touch "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+    gtk-update-icon-cache -f -t \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
+    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache" 2>/dev/null || true
+    kbuildsycoca6 --noincremental >/dev/null 2>&1 || \
+        kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
 }
 
 # ----------------------------------------------------------------- main -----

@@ -46,7 +46,7 @@ Pegue um na [release mais recente](https://github.com/gabrielmf1998/WayClick/rel
 |---|---|
 | **Fedora, RHEL** | `sudo dnf install ./wayclick-*.noarch.rpm` |
 | **Debian, Ubuntu** | `sudo apt install ./wayclick_*_all.deb` |
-| **Arch, Manjaro** | `makepkg -si` a partir do [`packaging/PKGBUILD`](packaging/PKGBUILD) |
+| **Arch, Manjaro** | `sudo pacman -U ./wayclick-*-any.pkg.tar.zst` |
 | **Qualquer outra** | `chmod +x WayClick-*.AppImage && ./WayClick-*.AppImage` |
 
 Os pacotes já trazem a regra de udev, então só falta entrar uma vez no grupo
@@ -357,8 +357,9 @@ Use onde automação for permitida. Muito jogo online bane automação de entrad
 ```bash
 bash packaging/build-rpm.sh        # precisa de rpm-build
 bash packaging/build-deb.sh        # só precisa de ar e tar, sem dpkg
+bash packaging/build-pacman.sh     # precisa de bsdtar, constrói fora do Arch
 bash packaging/build-appimage.sh   # baixa um Python e um Qt portáteis
-makepkg -p packaging/PKGBUILD      # no Arch
+makepkg -p packaging/PKGBUILD      # a via a partir do fonte, no Arch
 ```
 
 Tudo cai em `dist/`. Um push de tag constrói os quatro no CI e anexa na
