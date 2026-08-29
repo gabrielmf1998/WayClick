@@ -25,7 +25,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----
@@ -1222,6 +1222,11 @@ TRANSLATIONS = {
         "WayClick": "WayClick",
         "File": "Arquivo", "Settings": "Configurações", "Help": "Ajuda",
         "Theme": "Tema", "Language": "Idioma",
+        "Tray icon": "Ícone da bandeja", "Shape": "Formato", "Color": "Cor",
+        "Cursor": "Cursor", "Mouse": "Mouse", "Dot": "Ponto", "Ring": "Anel",
+        "Match state": "Conforme o estado", "Green": "Verde", "Blue": "Azul",
+        "Purple": "Roxo", "Orange": "Laranja", "Red": "Vermelho",
+        "Teal": "Verde-azulado", "Grey": "Cinza",
         "System": "Sistema", "Dark": "Escuro", "Light": "Claro",
         "Start": "Iniciar", "Stop": "Parar",
         "Hide to tray": "Esconder na bandeja",
@@ -1517,16 +1522,65 @@ def wayclick_icon(state="", size=64):
     return QIcon(px)
 
 
-def tray_icon(state="", phase=0, size=64):
+# Estilos da bandeja. Cada um desenha num quadrado 64x64, escalado por `s`.
+def _tray_cursor(p, col, s):
+    _draw_arrow(p, col, s)
+
+
+def _tray_mouse(p, col, s):
+    p.setBrush(QColor(col))
+    p.setPen(QPen(QColor(INK), 5 * s))
+    p.drawRoundedRect(QRectF(16 * s, 6 * s, 32 * s, 52 * s), 16 * s, 18 * s)
+    p.setPen(QPen(QColor(INK), 4 * s))
+    p.drawLine(18 * s, 27 * s, 46 * s, 27 * s)
+    p.setBrush(QColor(INK))
+    p.setPen(Qt.NoPen)
+    p.drawRoundedRect(QRectF(29 * s, 12 * s, 6 * s, 13 * s), 3 * s, 3 * s)
+
+
+def _tray_dot(p, col, s):
+    p.setPen(QPen(QColor(INK), 5 * s))
+    p.setBrush(QColor(col))
+    p.drawEllipse(QRectF(12 * s, 12 * s, 40 * s, 40 * s))
+
+
+def _tray_ring(p, col, s):
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(QColor(INK), 12 * s))
+    p.drawEllipse(QRectF(13 * s, 13 * s, 38 * s, 38 * s))
+    p.setPen(QPen(QColor(col), 8 * s))
+    p.drawEllipse(QRectF(13 * s, 13 * s, 38 * s, 38 * s))
+
+
+TRAY_STYLES = {"Cursor": _tray_cursor, "Mouse": _tray_mouse,
+               "Dot": _tray_dot, "Ring": _tray_ring}
+TRAY_COLORS = {"Match state": None, "Green": "#27ae60", "Blue": "#3daee9",
+               "Purple": "#9b59b6", "Orange": "#f39c12", "Red": "#e74c3c",
+               "Teal": "#1abc9c", "Grey": "#9aa3ab"}
+BURST_FRAMES = 6
+
+
+def tray_icon(state="", phase=0, style="Cursor", color="Match state",
+              burst=None, size=64):
     """Bandeja: sem placa, para ficar legível a 22 px como os outros ícones do
-    painel. A onda muda de opacidade por fase — é a animação de "rodando"."""
+    painel. A onda muda de opacidade por fase enquanto roda, e `burst` toca um
+    anel que cresce e some — o retorno visual de "acabei de ligar"."""
     px = QPixmap(size, size)
     px.fill(Qt.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.Antialiasing)
     s = size / 64.0
-    col = QColor(STATE_COLORS.get(state, STATE_COLORS[""]))
-    if state in ("run", "armed"):
+    fixed = TRAY_COLORS.get(color)
+    col = QColor(fixed or STATE_COLORS.get(state, STATE_COLORS[""]))
+    if burst is not None and burst < BURST_FRAMES:
+        t = burst / (BURST_FRAMES - 1.0)
+        r = (10 + 22 * t) * s
+        p.setPen(QPen(col, max(1.0, 6 * (1 - t) * s)))
+        p.setBrush(Qt.NoBrush)
+        p.setOpacity(max(0.0, 0.85 * (1 - t)))
+        p.drawEllipse(QRectF(32 * s - r, 32 * s - r, 2 * r, 2 * r))
+        p.setOpacity(1.0)
+    elif state in ("run", "armed"):
         pen = QPen(col, 5 * s)
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
@@ -1534,7 +1588,7 @@ def tray_icon(state="", phase=0, size=64):
         p.setOpacity((0.95, 0.6, 0.28)[phase % 3])
         p.drawArc(QRectF(6 * s, 2 * s, 34 * s, 34 * s), -20 * 16, 100 * 16)
         p.setOpacity(1.0)
-    _draw_arrow(p, col, s)
+    TRAY_STYLES.get(style, _tray_cursor)(p, col.name(), s)
     p.end()
     return QIcon(px)
 
@@ -1589,6 +1643,7 @@ class App(QWidget):
         super().__init__()
         self._state = ""
         self._pulse = 0
+        self._burst = None
         self.mouse = None
         self.keyboard = None
         self.clicker = None
@@ -1610,6 +1665,8 @@ class App(QWidget):
         global LANG
         LANG = cfg.get("language") or default_language()
         self.theme = cfg.get("theme", "System")
+        self.tray_style = cfg.get("tray_style", "Cursor")
+        self.tray_color = cfg.get("tray_color", "Match state")
         apply_theme(self.theme)
         self.setWindowTitle(_("WayClick"))
 
@@ -1948,6 +2005,24 @@ class App(QWidget):
             act.setCheckable(True)
             act.triggered.connect(lambda _c=False, n=name: self._set_theme(n))
             self.theme_acts[name] = act
+        self.m_tray = self.m_set.addMenu(_("Tray icon"))
+        self.m_style = self.m_tray.addMenu(_("Shape"))
+        self.style_acts = {}
+        for name in TRAY_STYLES:
+            act = self.m_style.addAction(_(name))
+            act.setCheckable(True)
+            act.setChecked(name == self.tray_style)
+            act.triggered.connect(lambda _c=False, n=name: self._set_tray_style(n))
+            self.style_acts[name] = act
+        self.m_tcolor = self.m_tray.addMenu(_("Color"))
+        self.color_acts = {}
+        for name in TRAY_COLORS:
+            act = self.m_tcolor.addAction(_(name))
+            act.setCheckable(True)
+            act.setChecked(name == self.tray_color)
+            act.triggered.connect(lambda _c=False, n=name: self._set_tray_color(n))
+            self.color_acts[name] = act
+
         self.m_lang = self.m_set.addMenu(_("Language"))
         self.lang_acts = {}
         for label, code in LANGS.items():
@@ -2033,6 +2108,13 @@ class App(QWidget):
         self.m_file.setTitle(_("File"))
         self.m_set.setTitle(_("Settings"))
         self.m_theme.setTitle(_("Theme"))
+        self.m_tray.setTitle(_("Tray icon"))
+        self.m_style.setTitle(_("Shape"))
+        self.m_tcolor.setTitle(_("Color"))
+        for name, act in self.style_acts.items():
+            act.setText(_(name))
+        for name, act in self.color_acts.items():
+            act.setText(_(name))
         self.m_lang.setTitle(_("Language"))
         self.m_help.setTitle(_("Help"))
         self.act_hide.setText(_("Hide to tray"))
@@ -2058,7 +2140,7 @@ class App(QWidget):
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(tray_icon(), self)
+        self.tray = QSystemTrayIcon(self._tray_pixmap(), self)
         menu = QMenu()
         self.act_toggle = QAction(_("Start"), self)
         self.act_toggle.triggered.connect(
@@ -2080,6 +2162,9 @@ class App(QWidget):
         self.pulse_timer = QTimer(self)
         self.pulse_timer.setInterval(550)
         self.pulse_timer.timeout.connect(self._pulse_tick)
+        self.burst_timer = QTimer(self)
+        self.burst_timer.setInterval(70)
+        self.burst_timer.timeout.connect(self._burst_tick)
         self.tray.show()
         self._sync_tray()
         # com a bandeja ativa, fechar a janela só esconde; sair é pelo menu
@@ -2098,9 +2183,42 @@ class App(QWidget):
             self.activateWindow()
         self._sync_tray()
 
+    def _tray_pixmap(self):
+        return tray_icon(getattr(self, "_state", ""), self._pulse,
+                         self.tray_style, self.tray_color, self._burst)
+
     def _pulse_tick(self):
         self._pulse = (self._pulse + 1) % 3
-        self.tray.setIcon(tray_icon(getattr(self, "_state", ""), self._pulse))
+        self.tray.setIcon(self._tray_pixmap())
+
+    def _burst_tick(self):
+        """Anel que cresce e some ao ligar ou desligar: feedback de que o
+        atalho pegou, mesmo com a janela escondida."""
+        self._burst += 1
+        if self._burst >= BURST_FRAMES:
+            self._burst = None
+            self.burst_timer.stop()
+        if self.tray:
+            self.tray.setIcon(self._tray_pixmap())
+
+    def _burst_start(self):
+        if not self.tray:
+            return
+        self._burst = 0
+        self.burst_timer.start()
+        self.tray.setIcon(self._tray_pixmap())
+
+    def _set_tray_style(self, name):
+        self.tray_style = name
+        for n, act in self.style_acts.items():
+            act.setChecked(n == name)
+        self._sync_tray()
+
+    def _set_tray_color(self, name):
+        self.tray_color = name
+        for n, act in self.color_acts.items():
+            act.setChecked(n == name)
+        self._sync_tray()
 
     def _sync_tray(self):
         if not getattr(self, "tray", None):   # _paint_status roda antes da tray
@@ -2116,7 +2234,7 @@ class App(QWidget):
                  "armed": _("ARMED — hold {btn} mouse button",
                             btn=self.btn_sel.currentText().lower())
                  }.get(state, _("Stopped"))
-        self.tray.setIcon(tray_icon(state, self._pulse))
+        self.tray.setIcon(self._tray_pixmap())
         self.tray.setToolTip(f"WayClick — {label}")
         self.act_toggle.setText(_("Stop") if self.running else _("Start"))
         self.act_window.setText(_("Hide window") if self.isVisible()
@@ -2216,6 +2334,7 @@ class App(QWidget):
             self.running = True
             self.btn.setText(_("Stop"))
             self.act_run.setText(_("Stop"))
+            self._burst_start()
             self._beep("on")
             self._left = self.delay.value()
             if self._left:
@@ -2236,6 +2355,7 @@ class App(QWidget):
             self._show_status()
             self.btn.setText(_("Start"))
             self.act_run.setText(_("Start"))
+            self._burst_start()
             self._beep("off")
         self._paint_status()
 
@@ -2580,6 +2700,8 @@ class App(QWidget):
                            "target_key_code": self.win_key.code,
                            "target_seconds": self.win_secs.value(),
                            "theme": self.theme,
+                           "tray_style": self.tray_style,
+                           "tray_color": self.tray_color,
                            "language": LANG}, fh)
         except Exception:
             pass

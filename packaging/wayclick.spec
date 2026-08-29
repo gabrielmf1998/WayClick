@@ -1,7 +1,7 @@
 %global appname wayclick
 
 Name:           wayclick
-Version:        1.3.0
+Version:        1.3.1
 Release:        1%{?dist}
 Summary:        Autoclicker for Wayland, using /dev/uinput
 
