@@ -21,7 +21,7 @@ running as root.
 - **Send key to a window** — pick an open window and feed it a key; for X11
   targets it arrives with no focus change, even minimized
 - **Anti-AFK** — nudges the pointer and puts it back, with zero drift
-- **Tray icon** in four shapes and eight colors, pulsing while it works and
+- **Tray icon** in four shapes and ten colors, pulsing while it works and
   flashing when you start it; autostart, your system color schemes, English and
   Portuguese
 
@@ -142,10 +142,13 @@ preferences are saved. The language defaults to your locale, so a Brazilian
 system opens in Portuguese with no setup.
 
 **Tray icon** has its own submenu: the **shape** (cursor, mouse, dot or ring)
-and the **color** — one of seven fixed colors, or *Match state*, which keeps the
-default grey stopped, blue armed, green clicking. The icon pulses while running
-and plays a short expanding ring the moment you start or stop, which is the
-feedback you want when triggering by hotkey with the window hidden.
+and the **color** — one of nine fixed colors including white and black, or
+*Match state*, which keeps the default grey stopped, blue armed, green
+clicking. The outline flips between dark and light depending on the fill, so
+white and black stay visible on any panel. The glyph pulses while running, and
+starting or stopping pops it from small to full size behind a ring that
+expands and fades — the feedback you want when triggering by hotkey with the
+window hidden.
 
 **Theme** reads the color schemes installed on your system
 (`/usr/share/color-schemes/*.colors`), so "Breeze Dark" here is the real Breeze

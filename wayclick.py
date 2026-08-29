@@ -9,7 +9,8 @@ try:
                                 Slot)
     from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QIcon,
                                QLinearGradient,
-                               QKeySequence, QPainter, QPen, QPixmap,
+                               QKeySequence, QPainter, QPainterPath, QPen,
+                               QPixmap,
                                QShortcut)
     from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                    QFormLayout, QDoubleSpinBox, QGroupBox,
@@ -25,7 +26,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----
@@ -1480,7 +1481,6 @@ INK = "#12161a"
 
 
 def _draw_arrow(p, color, scale):
-    from PySide6.QtGui import QPainterPath
     path = QPainterPath()
     pts = [QPointF(x * scale, y * scale) for x, y in ARROW]
     path.moveTo(pts[0])
@@ -1522,73 +1522,111 @@ def wayclick_icon(state="", size=64):
     return QIcon(px)
 
 
-# Estilos da bandeja. Cada um desenha num quadrado 64x64, escalado por `s`.
-def _tray_cursor(p, col, s):
-    _draw_arrow(p, col, s)
+# Estilos da bandeja. Cada um preenche ~58 de 64 px: os ícones do painel são
+# quadrados e cheios, então glifo estreito parece pequeno ao lado dos outros.
+def _ink_for(col):
+    """Contorno claro em cor escura e vice-versa — sem isso Black some no painel
+    escuro e White some no claro."""
+    c = QColor(col)
+    lum = (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) / 255.0
+    return "#12161a" if lum > 0.45 else "#eef1f4"
 
 
-def _tray_mouse(p, col, s):
+def _tray_cursor(p, col, s, ink):
+    pts = [(16, 3), (16, 53), (27, 43), (34, 61), (44, 57), (37, 40), (51, 39)]
+    path = QPainterPath()
+    q = [QPointF(x * s, y * s) for x, y in pts]
+    path.moveTo(q[0])
+    for pt in q[1:]:
+        path.lineTo(pt)
+    path.closeSubpath()
+    pen = QPen(QColor(ink), 6 * s)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
     p.setBrush(QColor(col))
-    p.setPen(QPen(QColor(INK), 5 * s))
-    p.drawRoundedRect(QRectF(16 * s, 6 * s, 32 * s, 52 * s), 16 * s, 18 * s)
-    p.setPen(QPen(QColor(INK), 4 * s))
-    p.drawLine(18 * s, 27 * s, 46 * s, 27 * s)
-    p.setBrush(QColor(INK))
+    p.drawPath(path)
+
+
+def _tray_mouse(p, col, s, ink):
+    p.setBrush(QColor(col))
+    p.setPen(QPen(QColor(ink), 6 * s))
+    p.drawRoundedRect(QRectF(12 * s, 4 * s, 40 * s, 56 * s), 20 * s, 22 * s)
+    p.setPen(QPen(QColor(ink), 4 * s))
+    p.drawLine(15 * s, 27 * s, 49 * s, 27 * s)
+    p.setBrush(QColor(ink))
     p.setPen(Qt.NoPen)
-    p.drawRoundedRect(QRectF(29 * s, 12 * s, 6 * s, 13 * s), 3 * s, 3 * s)
+    p.drawRoundedRect(QRectF(29 * s, 11 * s, 6 * s, 14 * s), 3 * s, 3 * s)
 
 
-def _tray_dot(p, col, s):
-    p.setPen(QPen(QColor(INK), 5 * s))
+def _tray_dot(p, col, s, ink):
+    p.setPen(QPen(QColor(ink), 6 * s))
     p.setBrush(QColor(col))
-    p.drawEllipse(QRectF(12 * s, 12 * s, 40 * s, 40 * s))
+    p.drawEllipse(QRectF(6 * s, 6 * s, 52 * s, 52 * s))
 
 
-def _tray_ring(p, col, s):
+def _tray_ring(p, col, s, ink):
     p.setBrush(Qt.NoBrush)
-    p.setPen(QPen(QColor(INK), 12 * s))
-    p.drawEllipse(QRectF(13 * s, 13 * s, 38 * s, 38 * s))
-    p.setPen(QPen(QColor(col), 8 * s))
-    p.drawEllipse(QRectF(13 * s, 13 * s, 38 * s, 38 * s))
+    p.setPen(QPen(QColor(ink), 16 * s))
+    p.drawEllipse(QRectF(9 * s, 9 * s, 46 * s, 46 * s))
+    p.setPen(QPen(QColor(col), 11 * s))
+    p.drawEllipse(QRectF(9 * s, 9 * s, 46 * s, 46 * s))
 
 
 TRAY_STYLES = {"Cursor": _tray_cursor, "Mouse": _tray_mouse,
                "Dot": _tray_dot, "Ring": _tray_ring}
 TRAY_COLORS = {"Match state": None, "Green": "#27ae60", "Blue": "#3daee9",
                "Purple": "#9b59b6", "Orange": "#f39c12", "Red": "#e74c3c",
-               "Teal": "#1abc9c", "Grey": "#9aa3ab"}
+               "Teal": "#1abc9c", "Grey": "#9aa3ab", "White": "#f2f4f6",
+               "Black": "#15191d"}
 BURST_FRAMES = 6
+PULSE_TINTS = (1.0, 0.72, 0.5)      # brilho do glifo em cada fase do pulso
+
+
+def _tint(col, factor):
+    c = QColor(col)
+    return QColor.fromHsvF(c.hueF(), c.saturationF() * (0.4 + 0.6 * factor),
+                           min(1.0, c.valueF() * (0.55 + 0.45 * factor)))
 
 
 def tray_icon(state="", phase=0, style="Cursor", color="Match state",
               burst=None, size=64):
-    """Bandeja: sem placa, para ficar legível a 22 px como os outros ícones do
-    painel. A onda muda de opacidade por fase enquanto roda, e `burst` toca um
-    anel que cresce e some — o retorno visual de "acabei de ligar"."""
+    """Ícone da bandeja, sem placa, para ficar do tamanho dos outros do painel.
+
+    A animação é a mesma para todo formato de propósito: pulsar o próprio glifo
+    (e não um arco desenhado ao lado) é o que funciona igual num cursor, num
+    ponto e num anel — o arco fixo do desenho anterior só fazia sentido para o
+    cursor e ficava deslocado nos outros.
+    """
     px = QPixmap(size, size)
     px.fill(Qt.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.Antialiasing)
     s = size / 64.0
     fixed = TRAY_COLORS.get(color)
-    col = QColor(fixed or STATE_COLORS.get(state, STATE_COLORS[""]))
+    base = QColor(fixed or STATE_COLORS.get(state, STATE_COLORS[""]))
+    # o contorno sai da cor BASE, nunca da cor pulsada: calculado do tom
+    # escurecido ele cruzava o limiar de luminância e piscava de preto para
+    # branco no meio da animação
+    ink = _ink_for(base)
+    col, scale = base, 1.0
     if burst is not None and burst < BURST_FRAMES:
         t = burst / (BURST_FRAMES - 1.0)
-        r = (10 + 22 * t) * s
-        p.setPen(QPen(col, max(1.0, 6 * (1 - t) * s)))
+        r = (14 + 18 * t) * s
+        p.setPen(QPen(base, max(1.0, 7 * (1 - t) * s)))
         p.setBrush(Qt.NoBrush)
-        p.setOpacity(max(0.0, 0.85 * (1 - t)))
+        p.setOpacity(max(0.0, 0.9 * (1 - t)))
         p.drawEllipse(QRectF(32 * s - r, 32 * s - r, 2 * r, 2 * r))
         p.setOpacity(1.0)
+        # o glifo encolhe e volta: sem isso ele tapa o anel, que agora quase
+        # não sobrava espaço com o glifo preenchendo 58 de 64 px
+        scale = 0.62 + 0.38 * t
     elif state in ("run", "armed"):
-        pen = QPen(col, 5 * s)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        p.setOpacity((0.95, 0.6, 0.28)[phase % 3])
-        p.drawArc(QRectF(6 * s, 2 * s, 34 * s, 34 * s), -20 * 16, 100 * 16)
-        p.setOpacity(1.0)
-    TRAY_STYLES.get(style, _tray_cursor)(p, col.name(), s)
+        col = _tint(base, PULSE_TINTS[phase % len(PULSE_TINTS)])
+    if scale != 1.0:
+        p.translate(32 * s, 32 * s)
+        p.scale(scale, scale)
+        p.translate(-32 * s, -32 * s)
+    TRAY_STYLES.get(style, _tray_cursor)(p, col.name(), s, ink)
     p.end()
     return QIcon(px)
 

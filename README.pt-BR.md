@@ -22,7 +22,7 @@ compositor e sem nada rodando como root.
 - **Mandar tecla para uma janela** — escolha uma janela aberta e alimente ela
   com uma tecla; em alvo X11 chega sem mexer no foco, mesmo minimizada
 - **Anti-AFK** — mexe o ponteiro e devolve, com deriva zero
-- **Ícone na bandeja** em quatro formatos e oito cores, pulsando enquanto
+- **Ícone na bandeja** em quatro formatos e dez cores, pulsando enquanto
   trabalha e piscando ao ligar; iniciar com o sistema, os esquemas de cor do
   seu sistema, inglês e português
 
@@ -143,10 +143,13 @@ mostra a versão. As duas preferências ficam salvas. O idioma vem do locale do
 sistema, então uma máquina brasileira já abre em português sem configurar nada.
 
 O **Ícone da bandeja** tem submenu próprio: o **formato** (cursor, mouse, ponto
-ou anel) e a **cor** — uma das sete fixas, ou *Conforme o estado*, que mantém o
-padrão cinza parado, azul armado, verde clicando. O ícone pulsa enquanto roda e
-toca um anel que cresce e some no instante em que você liga ou desliga, que é o
-retorno que faltava quando se aciona pelo atalho com a janela escondida.
+ou anel) e a **cor** — uma das nove fixas, incluindo branco e preto, ou
+*Conforme o estado*, que mantém o padrão cinza parado, azul armado, verde
+clicando. O contorno alterna entre escuro e claro conforme o preenchimento,
+então branco e preto continuam visíveis em qualquer painel. O glifo pulsa
+enquanto roda, e ligar ou desligar faz ele saltar de pequeno para o tamanho
+cheio atrás de um anel que cresce e some — o retorno que faltava quando se
+aciona pelo atalho com a janela escondida.
 
 O **Tema** lê os esquemas de cor instalados no seu sistema
 (`/usr/share/color-schemes/*.colors`), então o "Breeze Dark" aqui é o Breeze
