@@ -5,9 +5,10 @@ import struct
 import signal, subprocess, sys, tempfile, threading, time, wave
 
 try:
-    from PySide6.QtCore import (Qt, QObject, QRectF, QTimer, QUrl, Signal,
+    from PySide6.QtCore import (Qt, QObject, QPointF, QRectF, QTimer, QUrl, Signal,
                                 Slot)
-    from PySide6.QtGui import (QAction, QColor, QDesktopServices, QIcon,
+    from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QIcon,
+                               QLinearGradient,
                                QKeySequence, QPainter, QPen, QPixmap,
                                QShortcut)
     from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
@@ -15,7 +16,7 @@ try:
                                    QHBoxLayout, QLabel, QMenu, QMenuBar,
                                    QMessageBox, QPushButton, QScrollArea,
                                    QSpinBox, QSystemTrayIcon, QVBoxLayout,
-                                   QWidget, QFrame)
+                                   QWidget, QFrame, QListView, QTabWidget)
 except ImportError:
     sys.exit("PySide6 is required.\n"
              "  Fedora/RHEL:   sudo dnf install python3-pyside6\n"
@@ -24,7 +25,7 @@ except ImportError:
              "python3-pyside6.qtmultimedia\n"
              "  any distro:    pip install --user PySide6")
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
 
 # ---------------------------------------------------------------- uinput ----
@@ -1249,8 +1250,15 @@ TRANSLATIONS = {
         "Nothing to run: enable Click, Keyboard macro or Send key to a window.":
             "Nada para executar: habilite Clique, Macro de teclado ou Mandar "
             "tecla para uma janela.",
-        "Click": "Clique", "Keyboard macro": "Macro de teclado",
+        "Click": "Clique", "Keyboard": "Teclado", "Window": "Janela",
         "Trigger": "Acionamento",
+        "Enable clicking": "Habilitar o clique",
+        "Enable the keyboard macro": "Habilitar a macro de teclado",
+        "Enable sending the key": "Habilitar o envio da tecla",
+        "1000 ms is 1 click/s, 0.1 ms is 10,000. Lower is faster.":
+            "1000 ms é 1 clique/s, 0,1 ms é 10.000. Menor é mais rápido.",
+        "Click the key field and press the key you want.":
+            "Clique no campo da tecla e aperte a tecla que quiser.",
         "Mouse:": "Mouse:", "Interval:": "Intervalo:", "Button:": "Botão:",
         "Key:": "Tecla:", "Action:": "Ação:", "Mode:": "Modo:",
         "Start delay:": "Atraso ao iniciar:",
@@ -1285,14 +1293,6 @@ TRANSLATIONS = {
             "Modo segurar: enquanto armado, o botão {btn} do mouse é capturado e "
             "vira o fluxo de cliques — segure para clicar, solte para parar. "
             "{hk} arma e desarma; Esc desarma.",
-        "Interval between clicks: 1000 ms (1 click/s) down to 0.1 ms "
-        "(10,000 clicks/s). Lower = faster. Above a few thousand clicks/s the "
-        "target app may drop some. Closing this window leaves it running in the "
-        "tray — quit from the tray menu.":
-            "Intervalo entre cliques: de 1000 ms (1 clique/s) até 0,1 ms "
-            "(10.000 cliques/s). Menor = mais rápido. Acima de alguns milhares "
-            "de cliques/s o programa alvo pode descartar parte. Fechar esta "
-            "janela deixa o app na bandeja — para sair, use o menu da bandeja.",
         "Global hotkey OFF: you are in the 'input' group but this session "
         "started before that, so it has no access yet. Log out and back in, "
         "or run:  sg input -c '{cmd}'":
@@ -1330,8 +1330,109 @@ def default_language():
 
 
 # --------------------------------------------------------------- tema ------
-THEMES = ("System", "Dark", "Light")
+# As cores saem dos esquemas do próprio KDE (/usr/share/color-schemes/*.colors),
+# então "Breeze Dark" aqui é exatamente o Breeze Dark do sistema, e não um
+# escuro inventado. Quem não tiver os arquivos cai nos dois embutidos.
+SCHEME_DIRS = ["/usr/share/color-schemes",
+               os.path.join(os.environ.get("XDG_DATA_HOME")
+                            or os.path.expanduser("~/.local/share"),
+                            "color-schemes")]
+
+# grupo do .colors -> (chave, papel do QPalette)
+SCHEME_MAP = [
+    ("Colors:Window", "BackgroundNormal", "Window"),
+    ("Colors:Window", "ForegroundNormal", "WindowText"),
+    ("Colors:View", "BackgroundNormal", "Base"),
+    ("Colors:View", "BackgroundAlternate", "AlternateBase"),
+    ("Colors:View", "ForegroundNormal", "Text"),
+    ("Colors:View", "ForegroundInactive", "PlaceholderText"),
+    ("Colors:View", "ForegroundLink", "Link"),
+    ("Colors:View", "ForegroundNegative", "BrightText"),
+    ("Colors:Button", "BackgroundNormal", "Button"),
+    ("Colors:Button", "ForegroundNormal", "ButtonText"),
+    ("Colors:Selection", "BackgroundNormal", "Highlight"),
+    ("Colors:Selection", "ForegroundNormal", "HighlightedText"),
+    ("Colors:Tooltip", "BackgroundNormal", "ToolTipBase"),
+    ("Colors:Tooltip", "ForegroundNormal", "ToolTipText"),
+]
+DISABLED_MAP = [("Colors:Window", "ForegroundInactive", "WindowText"),
+                ("Colors:View", "ForegroundInactive", "Text"),
+                ("Colors:Button", "ForegroundInactive", "ButtonText")]
+
+BUILTIN_SCHEMES = {
+    "Dark": {"Window": "#2a2e32", "WindowText": "#fcfcfc", "Base": "#1f2225",
+             "AlternateBase": "#2a2e32", "Text": "#fcfcfc", "Button": "#31363b",
+             "ButtonText": "#fcfcfc", "Highlight": "#3daee9",
+             "HighlightedText": "#fcfcfc", "Link": "#1d99f3",
+             "BrightText": "#da4453", "PlaceholderText": "#a1a9b1",
+             "ToolTipBase": "#31363b", "ToolTipText": "#fcfcfc",
+             "_disabled": {"WindowText": "#7f8c8d", "Text": "#7f8c8d",
+                           "ButtonText": "#7f8c8d"}},
+    "Light": {"Window": "#eff0f1", "WindowText": "#232629", "Base": "#fcfcfc",
+              "AlternateBase": "#eff0f1", "Text": "#232629",
+              "Button": "#eff0f1", "ButtonText": "#232629",
+              "Highlight": "#3daee9", "HighlightedText": "#fcfcfc",
+              "Link": "#2980b9", "BrightText": "#da4453",
+              "PlaceholderText": "#7f8c8d", "ToolTipBase": "#f7f7f7",
+              "ToolTipText": "#232629",
+              "_disabled": {"WindowText": "#a8a8a8", "Text": "#a8a8a8",
+                            "ButtonText": "#a8a8a8"}},
+}
+_SCHEMES = None
 _SYS = {}
+
+
+def _read_scheme(path):
+    """Lê um .colors do KDE (formato INI) para o formato de paleta daqui."""
+    groups, cur = {}, None
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    cur = line[1:-1]
+                    groups[cur] = {}
+                elif cur and "=" in line:
+                    k, v = line.split("=", 1)
+                    groups[cur][k.strip()] = v.strip()
+    except OSError:
+        return None
+    rgb = lambda v: "#%02x%02x%02x" % tuple(int(x) for x in v.split(",")[:3])
+    spec, disabled = {}, {}
+    try:
+        for group, key, role in SCHEME_MAP:
+            val = groups.get(group, {}).get(key)
+            if val:
+                spec[role] = rgb(val)
+        for group, key, role in DISABLED_MAP:
+            val = groups.get(group, {}).get(key)
+            if val:
+                disabled[role] = rgb(val)
+    except (ValueError, TypeError):
+        return None
+    if "Window" not in spec or "WindowText" not in spec:
+        return None
+    spec["_disabled"] = disabled
+    name = groups.get("General", {}).get("Name") or \
+        os.path.basename(path).replace(".colors", "")
+    return name, spec
+
+
+def color_schemes():
+    """{nome visível: paleta}, dos esquemas instalados mais os embutidos."""
+    global _SCHEMES
+    if _SCHEMES is not None:
+        return _SCHEMES
+    found = {}
+    for d in SCHEME_DIRS:
+        for path in sorted(glob.glob(os.path.join(d, "*.colors"))):
+            got = _read_scheme(path)
+            if got:
+                found[got[0]] = got[1]
+    for name, spec in BUILTIN_SCHEMES.items():
+        found.setdefault(name, spec)
+    _SCHEMES = found
+    return found
 
 
 def _palette(spec):
@@ -1345,61 +1446,95 @@ def _palette(spec):
     return pal
 
 
-DARK = {"Window": "#2e2e2e", "WindowText": "#e6e6e6", "Base": "#232323",
-        "AlternateBase": "#2e2e2e", "ToolTipBase": "#2e2e2e",
-        "ToolTipText": "#e6e6e6", "Text": "#e6e6e6", "Button": "#353535",
-        "ButtonText": "#e6e6e6", "BrightText": "#ff5555", "Link": "#4aa3f0",
-        "Highlight": "#2a7fd4", "HighlightedText": "#ffffff",
-        "PlaceholderText": "#8a8a8a",
-        "_disabled": {"Text": "#6f6f6f", "ButtonText": "#6f6f6f",
-                      "WindowText": "#6f6f6f"}}
-LIGHT = {"Window": "#f2f2f2", "WindowText": "#1b1b1b", "Base": "#ffffff",
-         "AlternateBase": "#ececec", "ToolTipBase": "#ffffdc",
-         "ToolTipText": "#1b1b1b", "Text": "#1b1b1b", "Button": "#e8e8e8",
-         "ButtonText": "#1b1b1b", "BrightText": "#c00000", "Link": "#0a58ca",
-         "Highlight": "#2a7fd4", "HighlightedText": "#ffffff",
-         "PlaceholderText": "#7a7a7a",
-         "_disabled": {"Text": "#9a9a9a", "ButtonText": "#9a9a9a",
-                       "WindowText": "#9a9a9a"}}
-
-
 def apply_theme(name):
-    """Fusion + paleta própria: o estilo nativo (Breeze e afins) ignora paleta,
-    então forçar tema exige trocar de estilo junto. 'System' devolve os dois."""
+    """Fusion + paleta: o estilo nativo ignora paleta, então forçar cor exige
+    trocar de estilo junto. 'System' devolve estilo e paleta originais."""
     app = QApplication.instance()
     if not app:
         return
     _SYS.setdefault("palette", QApplication.palette())
     _SYS.setdefault("style", app.style().objectName())
-    if name == "Dark":
-        app.setStyle("Fusion"); app.setPalette(_palette(DARK))
-    elif name == "Light":
-        app.setStyle("Fusion"); app.setPalette(_palette(LIGHT))
+    spec = color_schemes().get(name)
+    if spec:
+        app.setStyle("Fusion")
+        app.setPalette(_palette(spec))
     else:
-        app.setStyle(_SYS["style"]); app.setPalette(_SYS["palette"])
+        app.setStyle(_SYS["style"])
+        app.setPalette(_SYS["palette"])
+    for w in app.topLevelWidgets():          # sem isto o já desenhado não muda
+        w.setPalette(app.palette())
+        for child in w.findChildren(QWidget):
+            child.setPalette(app.palette())
 
 
 # ---------------------------------------------------------- ícone/tray ------
-STATE_COLORS = {"run": "#1a9e1a", "wait": "#c88000",
-                "armed": "#2a7fd4", "": "#8a8a8a"}
+STATE_COLORS = {"run": "#27ae60", "wait": "#f39c12",
+                "armed": "#3daee9", "": "#9aa3ab"}
+ARROW = [(20, 8), (20, 47), (29, 39), (35, 54), (43, 50), (37, 35), (48, 34)]
+INK = "#12161a"
 
 
-def mouse_icon(state=""):
-    """Ícone desenhado em código — nada de arquivo externo pra empacotar."""
-    px = QPixmap(64, 64)
+def _draw_arrow(p, color, scale):
+    from PySide6.QtGui import QPainterPath
+    path = QPainterPath()
+    pts = [QPointF(x * scale, y * scale) for x, y in ARROW]
+    path.moveTo(pts[0])
+    for q in pts[1:]:
+        path.lineTo(q)
+    path.closeSubpath()
+    pen = QPen(QColor(INK), 5 * scale)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QColor(color))
+    p.drawPath(path)
+
+
+def wayclick_icon(state="", size=64):
+    """Ícone do app: cursor com ondas de clique, numa placa arredondada."""
+    px = QPixmap(size, size)
     px.fill(Qt.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.Antialiasing)
-    color = QColor(STATE_COLORS.get(state, STATE_COLORS[""]))
-    ink = QColor("#0d0d0d")
-    p.setBrush(color)
-    p.setPen(QPen(ink, 5))
-    p.drawRoundedRect(QRectF(15, 5, 34, 54), 17, 19)   # corpo
-    p.setPen(QPen(ink, 4))
-    p.drawLine(17, 27, 47, 27)                          # separa os botões
-    p.setBrush(ink)
+    s = size / 64.0
+    grad = QLinearGradient(0, 0, 0, size)
+    grad.setColorAt(0, QColor("#3a4650"))
+    grad.setColorAt(1, QColor("#222a31"))
     p.setPen(Qt.NoPen)
-    p.drawRoundedRect(QRectF(29, 11, 6, 13), 3, 3)      # rodinha
+    p.setBrush(QBrush(grad))
+    p.drawRoundedRect(QRectF(2 * s, 2 * s, 60 * s, 60 * s), 14 * s, 14 * s)
+    col = QColor(STATE_COLORS.get(state, STATE_COLORS[""]))
+    pen = QPen(col, 4 * s)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    for i, r in enumerate((13, 19)):
+        p.setOpacity(0.8 - i * 0.35)
+        p.drawArc(QRectF((24 - r) * s, (20 - r) * s, 2 * r * s, 2 * r * s),
+                  -20 * 16, 100 * 16)
+    p.setOpacity(1.0)
+    _draw_arrow(p, "#f7f9fa" if not state else col, s)
+    p.end()
+    return QIcon(px)
+
+
+def tray_icon(state="", phase=0, size=64):
+    """Bandeja: sem placa, para ficar legível a 22 px como os outros ícones do
+    painel. A onda muda de opacidade por fase — é a animação de "rodando"."""
+    px = QPixmap(size, size)
+    px.fill(Qt.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.Antialiasing)
+    s = size / 64.0
+    col = QColor(STATE_COLORS.get(state, STATE_COLORS[""]))
+    if state in ("run", "armed"):
+        pen = QPen(col, 5 * s)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.setOpacity((0.95, 0.6, 0.28)[phase % 3])
+        p.drawArc(QRectF(6 * s, 2 * s, 34 * s, 34 * s), -20 * 16, 100 * 16)
+        p.setOpacity(1.0)
+    _draw_arrow(p, col, s)
     p.end()
     return QIcon(px)
 
@@ -1443,10 +1578,6 @@ def set_autostart(on):
 
 
 # ------------------------------------------------------------------ UI ------
-TIP_TEXT = ("Interval between clicks: 1000 ms (1 click/s) down to 0.1 ms "
-            "(10,000 clicks/s). Lower = faster. Above a few thousand clicks/s "
-            "the target app may drop some. Closing this window leaves it "
-            "running in the tray — quit from the tray menu.")
 MODES = {"Hotkey toggles": "toggle",
          "Clicks while hotkey is held": "hotkey_hold",
          "Clicks while mouse button is held": "mouse_hold"}
@@ -1457,6 +1588,7 @@ class App(QWidget):
     def __init__(self):
         super().__init__()
         self._state = ""
+        self._pulse = 0
         self.mouse = None
         self.keyboard = None
         self.clicker = None
@@ -1548,24 +1680,21 @@ class App(QWidget):
         self.key_interval.setEnabled(self.key_mode.currentData() == "Repeat")
 
         self._labels = []            # (widget, texto-fonte) para retraduzir
+        self._hints = []
         click_form = QFormLayout()
         self._row(click_form, "Mouse:", dev_row)
         self._row(click_form, "Interval:", self.interval)
         click_form.addRow("", self.rate)
         self._row(click_form, "Button:", self.btn_sel)
-        self.click_box = QGroupBox(_("Click"))
-        self.click_box.setCheckable(True)
+        self.click_box = QCheckBox(_("Enable clicking"))
         self.click_box.setChecked(cfg.get("click_enabled", True))
-        self.click_box.setLayout(click_form)
 
         key_form = QFormLayout()
         self._row(key_form, "Key:", self.key_sel)
         self._row(key_form, "Interval:", self.key_interval)
         self._row(key_form, "Action:", self.key_mode)
-        self.key_box = QGroupBox(_("Keyboard macro"))
-        self.key_box.setCheckable(True)
+        self.key_box = QCheckBox(_("Enable the keyboard macro"))
         self.key_box.setChecked(cfg.get("key_enabled", False))
-        self.key_box.setLayout(key_form)
         self.key_box.toggled.connect(self._key_box_toggled)
 
         form = QFormLayout()
@@ -1573,8 +1702,7 @@ class App(QWidget):
         self._row(form, "Start delay:", self.delay)
         self._row(form, "Auto-stop after:", self.duration)
         self._row(form, "Global hotkey:", self.hk)
-        box = QGroupBox(_("Trigger")); box.setLayout(form)
-        self.trigger_box = box
+        trigger_form = form
 
         # --- injeção direcionada a uma janela (beta) ---
         self.win_sel = QComboBox()
@@ -1606,13 +1734,8 @@ class App(QWidget):
         self._row(target_form, "Every:", self.win_secs)
         # o aviso fica fora do form: QLabel com quebra de linha dentro de
         # QFormLayout não calcula a altura e sai cortado
-        target_col = QVBoxLayout()
-        target_col.addLayout(target_form)
-        target_col.addWidget(self.win_warn)
-        self.target_box = QGroupBox(_("Send key to a window"))
-        self.target_box.setCheckable(True)
+        self.target_box = QCheckBox(_("Enable sending the key"))
         self.target_box.setChecked(False)
-        self.target_box.setLayout(target_col)
         self.target_box.toggled.connect(self._target_toggled)
 
         # --- anti-AFK (independente do Start) ---
@@ -1637,42 +1760,39 @@ class App(QWidget):
         self.warn.setStyleSheet("color:#c86000;font-size:11px;")
         self.warn.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        self.tip = QLabel(_(TIP_TEXT))
-        self.tip.setWordWrap(True)
-        self.tip.setStyleSheet("color:#888;font-size:11px;")
 
         checks = QHBoxLayout()
         checks.addWidget(self.sound)
         checks.addWidget(self.autostart)
         checks.addStretch()
 
-        lay = QVBoxLayout()
-        lay.addWidget(self.tip)
-        lay.addWidget(self.click_box)
-        lay.addWidget(self.key_box)
-        lay.addWidget(box)
-        lay.addWidget(self.target_box)
-        lay.addLayout(afk_row)
-        lay.addLayout(checks)
-        lay.addWidget(self.status)
-        lay.addWidget(self.btn)
-        lay.addWidget(self.warn)
+        # Abas em vez de tudo empilhado: com todos os grupos numa tela só a
+        # janela passava de 900 px de altura e não cabia num 1366x768.
+        self.tabs = QTabWidget()
+        self.tab_pages = []
+        self.tabs.addTab(self._page(self.click_box, click_form,
+                                    _("1000 ms is 1 click/s, 0.1 ms is 10,000. "
+                                      "Lower is faster.")), "")
+        self.tabs.addTab(self._page(self.key_box, key_form,
+                                    _("Click the key field and press the key "
+                                      "you want.")), "")
+        self.tabs.addTab(self._page(self.target_box, target_form, None,
+                                    extra=self.win_warn), "")
+        self.tabs.addTab(self._page(None, trigger_form, None,
+                                    extra=[afk_row, checks]), "")
+        self._tab_names = ["Click", "Keyboard", "Window", "Trigger"]
+        self._sync_tabs()
+        for w_ in (self.click_box, self.key_box, self.target_box):
+            w_.toggled.connect(self._sync_tabs)
 
-        # corpo rolável: em tela baixa o conteúdo não cabe todo e o layout
-        # começa a espremer as linhas dos grupos em vez de deixar rolar
-        body = QWidget()
-        body.setLayout(lay)
-        scroll = QScrollArea()
-        scroll.setWidget(body)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
         outer.setMenuBar(self._build_menu())
-        outer.addWidget(scroll)
-        self.resize(450, min(940, body.sizeHint().height() + 60))
-        self.setWindowIcon(mouse_icon())
+        outer.addWidget(self.tabs, 1)
+        outer.addWidget(self.status)
+        outer.addWidget(self.btn)
+        outer.addWidget(self.warn)
+        self.resize(460, 470)
+        self.setWindowIcon(wayclick_icon())
         self._show_rate()
         self._paint_status()
 
@@ -1756,13 +1876,51 @@ class App(QWidget):
                 "it clicks itself. That is what the {d}s start delay is for. "
                 "{hk} toggles; Esc stops.", d=self.delay.value(), hk=hk))
 
+    def _page(self, enable, form, hint=None, extra=None):
+        """Uma aba: caixa de habilitar (quando a aba é uma engine), o
+        formulário, e o que mais vier. Desabilitar a caixa apaga os campos,
+        como o QGroupBox marcável fazia antes."""
+        page = QWidget()
+        col = QVBoxLayout(page)
+        if enable is not None:
+            col.addWidget(enable)
+        fields = QWidget()
+        fields.setLayout(form)
+        col.addWidget(fields)
+        if enable is not None:
+            enable.toggled.connect(fields.setEnabled)
+            fields.setEnabled(enable.isChecked())
+        if hint:
+            lbl = QLabel(hint)
+            lbl.setWordWrap(True)
+            lbl.setEnabled(False)          # cinza pela paleta, não hardcoded
+            col.addWidget(lbl)
+            self._hints.append((lbl, hint))
+        for item in (extra if isinstance(extra, list) else [extra] if extra else []):
+            if isinstance(item, QWidget):
+                col.addWidget(item)
+            elif item is not None:
+                col.addLayout(item)
+        col.addStretch()
+        self.tab_pages.append(page)
+        return page
+
+    def _sync_tabs(self):
+        """Marca a aba cuja engine está ligada, para saber sem abrir."""
+        on = [self.click_box.isChecked(), self.key_box.isChecked(),
+              self.target_box.isChecked(), None]
+        for i, name in enumerate(self._tab_names):
+            mark = "● " if on[i] else ""
+            self.tabs.setTabText(i, mark + _(name))
+
     @staticmethod
     def _scrollable(combo, visible=5):
-        """Popup com no máximo `visible` itens e barra de rolagem. O
-        combobox-popup:0 é o que faz o Qt largar o popup nativo, que ignora
-        maxVisibleItems e abre uma lista do tamanho da tela."""
+        """Popup com no máximo `visible` itens e rolagem. Trocar a view por uma
+        QListView faz o Qt usar o popup de item view, que respeita
+        maxVisibleItems — via stylesheet (combobox-popup:0) também funciona, mas
+        aí a combo perde o desenho nativo e fica branca em tema escuro."""
+        combo.setView(QListView())
         combo.setMaxVisibleItems(visible)
-        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
 
     # -------------------------------------------------------- menu/i18n --
     def _row(self, form, text, widget):
@@ -1785,7 +1943,7 @@ class App(QWidget):
         self.m_set = bar.addMenu(_("Settings"))
         self.m_theme = self.m_set.addMenu(_("Theme"))
         self.theme_acts = {}
-        for name in THEMES:
+        for name in ["System"] + sorted(color_schemes()):
             act = self.m_theme.addAction(_(name))
             act.setCheckable(True)
             act.triggered.connect(lambda _c=False, n=name: self._set_theme(n))
@@ -1857,17 +2015,18 @@ class App(QWidget):
         self.setWindowTitle(_("WayClick"))
         for lbl, src in self._labels:
             lbl.setText(_(src))
-        self.click_box.setTitle(_("Click"))
-        self.key_box.setTitle(_("Keyboard macro"))
-        self.trigger_box.setTitle(_("Trigger"))
+        self.click_box.setText(_("Enable clicking"))
+        self.key_box.setText(_("Enable the keyboard macro"))
+        self.target_box.setText(_("Enable sending the key"))
         self.afk.setText(_("Anti-AFK: nudge the cursor every"))
-        self.target_box.setTitle(_("Send key to a window"))
+        for lbl, src in self._hints:
+            lbl.setText(_(src))
+        self._sync_tabs()
         self._update_win_warn()
         self.sound.setText(_("Sound feedback on hotkey"))
         self.autostart.setText(_("Start with system"))
         self.refresh_btn.setToolTip(_("Rescan mice"))
         self.duration.setSpecialValueText(_("never"))
-        self.tip.setText(_(TIP_TEXT))
         self._retext(self.mode, list(MODES.keys()))
         self._retext(self.btn_sel, list(BTN.keys()))
         self._retext(self.key_mode, ["Repeat", "Hold"])
@@ -1899,7 +2058,7 @@ class App(QWidget):
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(mouse_icon(), self)
+        self.tray = QSystemTrayIcon(tray_icon(), self)
         menu = QMenu()
         self.act_toggle = QAction(_("Start"), self)
         self.act_toggle.triggered.connect(
@@ -1918,6 +2077,9 @@ class App(QWidget):
         self.tray.setContextMenu(menu)
         self.menu = menu
         self.tray.activated.connect(self._tray_activated)
+        self.pulse_timer = QTimer(self)
+        self.pulse_timer.setInterval(550)
+        self.pulse_timer.timeout.connect(self._pulse_tick)
         self.tray.show()
         self._sync_tray()
         # com a bandeja ativa, fechar a janela só esconde; sair é pelo menu
@@ -1936,15 +2098,25 @@ class App(QWidget):
             self.activateWindow()
         self._sync_tray()
 
+    def _pulse_tick(self):
+        self._pulse = (self._pulse + 1) % 3
+        self.tray.setIcon(tray_icon(getattr(self, "_state", ""), self._pulse))
+
     def _sync_tray(self):
         if not getattr(self, "tray", None):   # _paint_status roda antes da tray
             return
         state = getattr(self, "_state", "")
+        if state in ("run", "armed"):         # anima só enquanto trabalha
+            if not self.pulse_timer.isActive():
+                self.pulse_timer.start()
+        else:
+            self.pulse_timer.stop()
+            self._pulse = 0
         label = {"run": _("RUNNING").capitalize(), "wait": _("Starting in {n}s…", n=""),
                  "armed": _("ARMED — hold {btn} mouse button",
                             btn=self.btn_sel.currentText().lower())
                  }.get(state, _("Stopped"))
-        self.tray.setIcon(mouse_icon(state))
+        self.tray.setIcon(tray_icon(state, self._pulse))
         self.tray.setToolTip(f"WayClick — {label}")
         self.act_toggle.setText(_("Stop") if self.running else _("Start"))
         self.act_window.setText(_("Hide window") if self.isVisible()

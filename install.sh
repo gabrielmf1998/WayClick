@@ -117,10 +117,18 @@ EOF
 
     cat > "$ICON_DIR/wayclick.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="15" y="5" width="34" height="54" rx="17" ry="19"
-        fill="#2a7fd4" stroke="#0d0d0d" stroke-width="5"/>
-  <line x1="17" y1="27" x2="47" y2="27" stroke="#0d0d0d" stroke-width="4"/>
-  <rect x="29" y="11" width="6" height="13" rx="3" fill="#0d0d0d"/>
+  <defs>
+    <linearGradient id="p" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a4650"/><stop offset="1" stop-color="#222a31"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#p)"/>
+  <path d="M 24 20 m 0 -13 a 13 13 0 0 1 12.2 8.4" fill="none"
+        stroke="#9aa3ab" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+  <path d="M 24 20 m 0 -19 a 19 19 0 0 1 17.9 12.3" fill="none"
+        stroke="#9aa3ab" stroke-width="4" stroke-linecap="round" opacity="0.45"/>
+  <path d="M20 8 L20 47 L29 39 L35 54 L43 50 L37 35 L48 34 Z"
+        fill="#f7f9fa" stroke="#12161a" stroke-width="5" stroke-linejoin="round"/>
 </svg>
 SVG
 

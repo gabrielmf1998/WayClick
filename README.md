@@ -22,7 +22,7 @@ running as root.
 - **Send key to a window** — pick an open window and feed it a key; for X11
   targets it arrives with no focus change, even minimized
 - **Anti-AFK** — nudges the pointer and puts it back, with zero drift
-- **Tray icon**, autostart, dark/light themes, English and Portuguese
+- **Tray icon** that pulses while it works, autostart, your system color schemes, English and Portuguese
 
 ---
 
@@ -110,15 +110,24 @@ wayclick --tray     # start hidden in the system tray
 wayclick --version
 ```
 
-The window has four checkable boxes. **Click**, **Keyboard macro** and **Send
-key to a window** are what runs — enable any combination. **Trigger** is how it
-starts and stops. Anti-AFK sits on its own, outside Start/Stop.
+Four tabs: **Click**, **Keyboard** and **Window** are the three things it can
+run — each has an *enable* box, and the tab shows a dot when it is on, so you
+can see what is armed without opening it. Enable any combination. **Trigger** is
+how it all starts and stops, plus Anti-AFK, which runs on its own outside
+Start/Stop. Status and the Start button stay visible below the tabs, and the
+window is small enough for a 1366×768 screen.
 
 The menu bar has the rest: **File** starts, stops, hides to tray and quits;
-**Settings** holds **Theme** (System, Dark, Light) and **Language** (English,
-Português BR) plus the sound and autostart toggles; **Help** links here and
-shows the version. Both preferences are saved. The language defaults to your
-locale, so a Brazilian system opens in Portuguese with no setup.
+**Settings** holds **Theme** and **Language** (English, Português BR) plus the
+sound and autostart toggles; **Help** links here and shows the version. Both
+preferences are saved. The language defaults to your locale, so a Brazilian
+system opens in Portuguese with no setup.
+
+**Theme** reads the color schemes installed on your system
+(`/usr/share/color-schemes/*.colors`), so "Breeze Dark" here is the real Breeze
+Dark, not an approximation — any scheme you install shows up in the menu. Two
+built-in schemes cover systems that ship none, and *System* hands the styling
+back to your desktop.
 
 ### Click
 

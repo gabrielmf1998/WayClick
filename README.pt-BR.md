@@ -22,8 +22,8 @@ compositor e sem nada rodando como root.
 - **Mandar tecla para uma janela** — escolha uma janela aberta e alimente ela
   com uma tecla; em alvo X11 chega sem mexer no foco, mesmo minimizada
 - **Anti-AFK** — mexe o ponteiro e devolve, com deriva zero
-- **Ícone na bandeja**, iniciar com o sistema, tema claro/escuro, inglês e
-  português
+- **Ícone na bandeja** que pulsa enquanto trabalha, iniciar com o sistema,
+  os esquemas de cor do seu sistema, inglês e português
 
 ---
 
@@ -111,17 +111,24 @@ wayclick --tray     # começa escondido na bandeja
 wayclick --version
 ```
 
-A janela tem quatro caixas ativáveis. **Clique**, **Macro de teclado** e
-**Mandar tecla para uma janela** são o que roda — habilite qualquer combinação.
-**Acionamento** é como liga e desliga. O Anti-AFK fica por fora, independente do
-Iniciar/Parar.
+São quatro abas: **Clique**, **Teclado** e **Janela** são as três coisas que ele
+pode executar — cada uma tem sua caixa de habilitar, e a aba ganha um ponto
+quando está ligada, então dá para ver o que está armado sem abrir. Habilite
+qualquer combinação. **Acionamento** é como tudo liga e desliga, mais o
+Anti-AFK, que roda por fora do Iniciar/Parar. O status e o botão Iniciar ficam
+sempre visíveis abaixo das abas, e a janela cabe numa tela de 1366×768.
 
 O resto está na barra de menus: **Arquivo** inicia, para, esconde na bandeja e
-sai; **Configurações** tem **Tema** (Sistema, Escuro, Claro) e **Idioma**
-(English, Português BR), além dos toggles de som e de iniciar com o sistema;
-**Ajuda** leva ao projeto e mostra a versão. As duas preferências ficam salvas.
-O idioma vem do locale do sistema, então uma máquina brasileira já abre em
-português sem configurar nada.
+sai; **Configurações** tem **Tema** e **Idioma** (English, Português BR), além
+dos toggles de som e de iniciar com o sistema; **Ajuda** leva ao projeto e
+mostra a versão. As duas preferências ficam salvas. O idioma vem do locale do
+sistema, então uma máquina brasileira já abre em português sem configurar nada.
+
+O **Tema** lê os esquemas de cor instalados no seu sistema
+(`/usr/share/color-schemes/*.colors`), então o "Breeze Dark" aqui é o Breeze
+Dark de verdade, não uma aproximação — qualquer esquema que você instalar
+aparece no menu. Dois esquemas embutidos cobrem quem não tem nenhum, e o
+*Sistema* devolve a aparência para o seu ambiente.
 
 ### Clique
 
