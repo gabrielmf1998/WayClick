@@ -65,6 +65,12 @@ install_deps() {
 
 # ------------------------------------------------------------ permissions ---
 setup_uinput() {
+    # atualizar não deveria pedir senha: se a regra já existe e o device está
+    # gravável, não há nada de root a fazer
+    if [ -e /etc/udev/rules.d/99-wayclick-uinput.rules ] && [ -w /dev/uinput ]; then
+        info "/dev/uinput already set up"
+        return
+    fi
     bold "Setting up /dev/uinput access (needs sudo)"
     need_sudo
     # o módulo não vem carregado em toda distro, e sem ele nem existe o device

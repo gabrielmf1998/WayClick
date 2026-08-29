@@ -37,6 +37,23 @@ running as root.
 
 ## Install
 
+### Packages
+
+Grab one from [the latest release](https://github.com/gabrielmf1998/WayClick/releases/latest):
+
+| | |
+|---|---|
+| **Fedora, RHEL** | `sudo dnf install ./wayclick-*.noarch.rpm` |
+| **Debian, Ubuntu** | `sudo apt install ./wayclick_*_all.deb` |
+| **Arch, Manjaro** | `makepkg -si` from [`packaging/PKGBUILD`](packaging/PKGBUILD) |
+| **Anything else** | `chmod +x WayClick-*.AppImage && ./WayClick-*.AppImage` |
+
+The packages ship the udev rule, so all that is left is joining the `input`
+group once: `sudo usermod -aG input $USER`, then log out and back in. The
+AppImage carries its own Python and Qt and needs no dependencies at all — only
+the hotkey beeps are missing there, since PySide6-Essentials leaves out
+QtMultimedia; it falls back to `paplay` from your system.
+
 ### One command
 
 ```bash
@@ -328,6 +345,28 @@ installed system-wide except the udev rule, and the virtual devices disappear
 when the process exits.
 
 Use it where automation is allowed. Plenty of online games ban input automation.
+
+## Building the packages
+
+```bash
+bash packaging/build-rpm.sh        # needs rpm-build
+bash packaging/build-deb.sh        # needs only ar and tar, no dpkg
+bash packaging/build-appimage.sh   # downloads a portable Python and Qt
+makepkg -p packaging/PKGBUILD      # on Arch
+```
+
+Everything lands in `dist/`. A tag push builds all of them on CI and attaches
+them to the release — see [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+## Uninstall
+
+```bash
+bash uninstall.sh            # keeps your settings and the udev rule
+bash uninstall.sh --purge    # removes those too
+```
+
+For a packaged install use your package manager instead (`dnf remove wayclick`,
+`apt remove wayclick`, `pacman -R wayclick`).
 
 ## License
 
