@@ -11,7 +11,6 @@ running as root.
 
 <p align="center">
   <img src="docs/wayclick-dark.png" width="46%" alt="WayClick, dark theme">
-  <img src="docs/wayclick-light.png" width="46%" alt="WayClick, light theme">
 </p>
 
 - **1 click/s down to a 0.1 ms interval** — 10,000 clicks/s, measured at 100%
