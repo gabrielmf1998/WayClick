@@ -142,11 +142,14 @@ SVG
 [Desktop Entry]
 Type=Application
 Name=WayClick
+GenericName=Autoclicker
 Comment=Autoclicker for Wayland, using /dev/uinput
+Comment[pt_BR]=Autoclicker para Wayland, via /dev/uinput
 Exec=$BIN_DIR/wayclick
 Icon=wayclick
 Terminal=false
 Categories=Utility;
+Keywords=autoclick;click;macro;wayland;uinput;
 StartupNotify=false
 EOF
     refresh_caches
