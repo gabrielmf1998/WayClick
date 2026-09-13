@@ -39,7 +39,7 @@ Description: Autoclicker for Wayland, using /dev/uinput
  An autoclicker that works on Wayland. It creates a virtual mouse in the
  kernel through /dev/uinput, so its clicks arrive as real input with no X11,
  no xdotool and nothing running as root. Goes from 1 click/s down to a 0.1 ms
- interval, with a global hotkey, a hold mode, a keyboard macro, per-window key
+ interval, with a global hotkey, a hold mode, a multi-key keyboard macro, per-window key
  injection and an anti-AFK nudge.
  .
  Members of the 'input' group can use it right after install; the package

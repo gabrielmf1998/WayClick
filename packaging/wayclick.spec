@@ -1,7 +1,7 @@
 %global appname wayclick
 
 Name:           wayclick
-Version:        1.3.2
+Version:        1.4.0
 Release:        1%{?dist}
 Summary:        Autoclicker for Wayland, using /dev/uinput
 
@@ -19,7 +19,7 @@ Recommends:     (python3-pyside6-multimedia or python3-pyside6)
 An autoclicker that works on Wayland. It creates a virtual mouse in the kernel
 through /dev/uinput, so its clicks arrive as real input with no X11, no xdotool
 and nothing running as root. Goes from 1 click/s down to a 0.1 ms interval,
-with a global hotkey, a hold mode, a keyboard macro, per-window key injection
+with a global hotkey, a hold mode, a multi-key keyboard macro, per-window key injection
 and an anti-AFK nudge.
 
 Members of the 'input' group can use it right after install; the package ships
@@ -66,5 +66,11 @@ python3 -c "import ast,sys; ast.parse(open('wayclick.py').read())"
 %{_prefix}/lib/modules-load.d/wayclick-uinput.conf
 
 %changelog
+* Sun Sep 13 2026 gabrielmf1998 <noreply@github.com> - 1.4.0-1
+- Keyboard macro takes several keys, each with its own interval
+- Trigger picks which engines it holds, and says so before you press it
+- Checks GitHub and GitLab for a newer release
+- Hold mode no longer eats the mouse button when clicking is off
+
 * Sat Aug 29 2026 gabrielmf1998 <noreply@github.com> - 1.3.0-1
 - Tabs, system color schemes, new icons
