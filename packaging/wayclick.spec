@@ -1,5 +1,10 @@
 %global appname wayclick
 
+# systemd-rpm-macros define _udevrulesdir, e ele não está num fedora:latest
+# pelado — que é onde o CI monta. Sem este fallback o %files quebra com
+# 'File must begin with "/"', que é o que derrubou a v1.3.1 e a v1.3.2.
+%{!?_udevrulesdir: %global _udevrulesdir %{_prefix}/lib/udev/rules.d}
+
 Name:           wayclick
 Version:        1.4.0
 Release:        1%{?dist}

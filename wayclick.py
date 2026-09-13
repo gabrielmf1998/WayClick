@@ -1416,8 +1416,8 @@ TRANSLATIONS = {
         "Trigger holds:": "O gatilho segura:",
         "Check for updates": "Procurar atualizações",
         "Check for updates on start": "Procurar atualizações ao abrir",
-        "WayClick {v} is available — you have {cur}.":
-            "WayClick {v} disponível — você tem a {cur}.",
+        "WayClick {v} is available. You have {cur}.":
+            "WayClick {v} disponível. Você tem a {cur}.",
         "Download": "Baixar",
         "Dismiss until next launch": "Esconder até a próxima abertura",
         "You are up to date ({v}).": "Você já está na versão mais recente ({v}).",
@@ -1865,6 +1865,7 @@ class App(QWidget):
         self._update_last = float(cfg.get("update_last", 0) or 0)
         self._update_hidden = False      # o × vale só nesta sessão
         self._update_told = False
+        self._tray_start = False         # só --tray avisa pela bandeja
         self._manual_check = False
         self.theme = cfg.get("theme", "System")
         self.tray_style = cfg.get("tray_style", "Cursor")
@@ -2554,14 +2555,24 @@ class App(QWidget):
         if not newer or self._update_hidden:
             self.update_bar.hide()
             return
-        text = _("WayClick {v} is available — you have {cur}.",
+        text = _("WayClick {v} is available. You have {cur}.",
                  v=newer.lstrip("vV"), cur=VERSION)
         self.update_lbl.setText(text)
         self.update_bar.show()
-        # com a janela escondida (--tray) a barra não serve para nada
-        if self.tray and not self.isVisible() and not self._update_told:
+        # sem janela (--tray) a barra não serve para nada, e o aviso vai pela
+        # bandeja. isVisible() não serve para decidir isso: no fim do __init__
+        # a janela ainda não foi mostrada, então toda abertura normal cairia
+        # aqui e o usuário levaria o popup E a barra.
+        if self.tray and self._tray_start and not self._update_told:
             self._update_told = True
             self.tray.showMessage(_("WayClick"), text, wayclick_icon())
+
+    def start_hidden(self):
+        """Início só na bandeja: é aqui que o aviso de versão vira notificação."""
+        self._tray_start = True
+        self.hide()
+        self._sync_tray()
+        self._show_update()
 
     def _dismiss_update(self):
         self._update_hidden = True
@@ -3265,8 +3276,7 @@ if __name__ == "__main__":
     wake.start()
 
     if "--tray" in sys.argv[1:] and w.tray:
-        w.hide()                          # início silencioso, só a bandeja
-        w._sync_tray()
+        w.start_hidden()                  # início silencioso, só a bandeja
     else:
         w.show()
     sys.exit(app.exec())
