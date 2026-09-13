@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
+a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
 import os as _os                       # config isolada e limpa por teste
 a.CFG = f"/tmp/autoclick-test-{_os.path.basename(__file__)}.json"
 _os.path.exists(a.CFG) and _os.remove(a.CFG)
@@ -58,9 +59,10 @@ app.aboutToQuit.connect(w.cleanup)
 w.sound.setChecked(False)
 w.click_box.setChecked(False)                 # o ponto do teste
 w.key_box.setChecked(True)
-w.key_sel.set_key(a.KEYS["Space"], "Space")
-w.key_interval.setValue(100.0)
-w.key_mode.setCurrentText("Repeat")
+row = w.key_rows[0]
+row.catcher.set_key(a.KEYS["Space"], "Space")
+row.interval.setValue(100.0)
+row.mode.setCurrentText("Repeat")
 w.mode.setCurrentText("Runs while mouse button is held")
 w.delay.setValue(0); w.duration.setValue(0)
 

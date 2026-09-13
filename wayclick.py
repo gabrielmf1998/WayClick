@@ -2,7 +2,8 @@
 """WayClick — autoclicker para Wayland via /dev/uinput (kernel), sem X11."""
 import ctypes, fcntl, glob, grp, json, math, os, pwd, re, select, shlex, shutil
 import struct
-import signal, subprocess, sys, tempfile, threading, time, wave
+import signal, subprocess, sys, tempfile, threading, time, urllib.request
+import wave
 
 try:
     from PySide6.QtCore import (Qt, QObject, QPointF, QRectF, QTimer, QUrl, Signal,
@@ -28,6 +29,66 @@ except ImportError:
 
 VERSION = "1.3.2"
 HOMEPAGE = "https://github.com/gabrielmf1998/WayClick"
+
+# ------------------------------------------------------------ updates ----
+# Quem instalou por pacote ou pelo install.sh não descobre que saiu versão nova
+# a não ser abrindo o repositório. O projeto vive no GitHub e no GitLab, e os
+# dois respondem "qual é a última release" sem autenticação — tenta um, cai no
+# outro, porque nem sempre a release sai nos dois ao mesmo tempo.
+UPDATE_SOURCES = (
+    "https://api.github.com/repos/gabrielmf1998/WayClick/releases/latest",
+    "https://gitlab.com/api/v4/projects/gabriel17166%2FWayClick/"
+    "releases/permalink/latest",
+)
+UPDATE_EVERY = 24 * 3600      # a resposta fica em cache; o aviso, esse é toda vez
+AUTO_UPDATE_CHECK = True      # os testes desligam: a suíte não pode depender de rede
+
+
+def parse_version(text):
+    """'v1.3.2' -> (1, 3, 2). Serve para comparar, não para exibir."""
+    nums = re.findall(r"\d+", text or "")
+    return tuple(int(x) for x in nums[:3]) or (0,)
+
+
+def newer_version(tag):
+    """A tag do repositório contra a local, '' quando não há novidade — o que
+    inclui o repositório estar atrás, que é o normal rodando do git."""
+    return tag if tag and parse_version(tag) > parse_version(VERSION) else ""
+
+
+class UpdateCheck(QObject):
+    """Pergunta ao repositório qual é a última release, fora da thread da UI.
+
+    Uma requisição HTTP na thread do Qt congelaria a janela pelo tempo do
+    timeout sempre que a rede estivesse ruim — e a janela abre antes de a
+    resposta chegar, de propósito: a checagem nunca atrasa o app.
+    """
+    done = Signal(str, str)          # tag, link ("" e "" se não deu ou não há)
+    TIMEOUT = 6
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        for url in UPDATE_SOURCES:
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": f"WayClick/{VERSION}",
+                                  "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=self.TIMEOUT) as fh:
+                    data = json.loads(fh.read().decode("utf-8", "replace"))
+            except Exception:
+                continue                 # fonte fora do ar: tenta a próxima
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            tag = (data.get("tag_name") or "").strip()
+            link = (data.get("html_url")
+                    or (data.get("_links") or {}).get("self") or HOMEPAGE)
+            if tag:
+                self.done.emit(tag, link)
+                return
+        self.done.emit("", "")
+
 
 # ---------------------------------------------------------------- uinput ----
 UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT = 0x40045564, 0x40045565, 0x40045566
@@ -1053,6 +1114,66 @@ class KeyCatcher(QPushButton):
         self.set_key(code, key_label(code, event))
 
 
+class KeyRow(QWidget):
+    """Uma tecla da macro: qual, de quanto em quanto, e o que fazer com ela.
+
+    A macro nasceu com uma tecla só, e é a pergunta óbvia de quem usa: andar e
+    atacar ao mesmo tempo são duas teclas. Cada linha carrega o seu próprio
+    intervalo porque o caso real é justamente assíncrono — W a cada 1 s e
+    Espaço a cada 50 ms não cabe num intervalo compartilhado.
+    """
+    removed = Signal(object)
+    changed = Signal()
+
+    def __init__(self, code=57, name="Space", interval_ms=200.0, mode="Repeat"):
+        super().__init__()
+        self.catcher = KeyCatcher(code, name)
+        self.interval = QDoubleSpinBox()
+        self.interval.setRange(1.0, 10000.0)
+        self.interval.setDecimals(0)
+        self.interval.setSingleStep(50.0)
+        self.interval.setSuffix(" ms")
+        self.interval.setValue(interval_ms)
+        self.interval.setFixedWidth(96)
+        self.mode = QComboBox()
+        self.mode.setFixedWidth(96)
+        for label in ("Repeat", "Hold"):
+            self.mode.addItem(_(label), label)
+        self.mode.setCurrentIndex(max(0, self.mode.findData(mode)))
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.minus = QPushButton("−")
+        self.minus.setFixedWidth(30)
+        self.minus.setToolTip(_("Remove this key"))
+        self.minus.clicked.connect(lambda: self.removed.emit(self))
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.catcher, 1)
+        for wdg in (self.interval, self.mode, self.minus):
+            row.addWidget(wdg)
+        self.interval.setEnabled(self.mode.currentData() == "Repeat")
+        self.catcher.changed.connect(self.changed)
+        self.interval.valueChanged.connect(lambda _v: self.changed.emit())
+
+    def _mode_changed(self, _i=0):
+        self.interval.setEnabled(self.mode.currentData() == "Repeat")
+        self.changed.emit()
+
+    def spec(self):
+        return {"key": self.catcher.name, "key_code": self.catcher.code,
+                "interval_ms": self.interval.value(),
+                "mode": self.mode.currentData()}
+
+    def retranslate(self):
+        keep = self.mode.currentIndex()
+        self.mode.blockSignals(True)
+        for i, src in enumerate(("Repeat", "Hold")):
+            self.mode.setItemText(i, _(src))
+        self.mode.setCurrentIndex(keep)
+        self.mode.blockSignals(False)
+        self.minus.setToolTip(_("Remove this key"))
+        self.catcher.setToolTip(_("Click, then press the key you want"))
+
+
 # nomes de keysym do X para as teclas que a macro oferece
 X_KEYSYM = {"Space": "space", "Enter": "Return", "Tab": "Tab", "Esc": "Escape",
             "Backspace": "BackSpace", "Delete": "Delete", "Insert": "Insert",
@@ -1280,7 +1401,33 @@ TRANSLATIONS = {
         "Global hotkey:": "Atalho global:",
         "Left": "Esquerdo", "Right": "Direito", "Middle": "Meio",
         "Repeat": "Repetir", "Hold": "Segurar",
-        "Hotkey toggles": "Atalho liga e desliga",
+        "Arm": "Armar",
+        "Trigger is the {btn} mouse button: arming runs nothing until you "
+        "hold it. To run the moment you press Arm, set Mode to 'No trigger' "
+        "— or untick it under 'Trigger holds'.":
+            "O gatilho é o botão {btn} do mouse: armar não roda nada até você "
+            "segurá-lo. Para rodar assim que apertar Armar, mude o Modo para "
+            "'Sem gatilho' — ou desmarque em 'O gatilho segura'.",
+        "Trigger is {hk} held down: arming runs nothing until you hold it. To "
+        "run the moment you press Arm, set Mode to 'No trigger'.":
+            "O gatilho é o {hk} segurado: armar não roda nada até você "
+            "segurá-lo. Para rodar assim que apertar Armar, mude o Modo para "
+            "'Sem gatilho'.",
+        "Trigger holds:": "O gatilho segura:",
+        "Check for updates": "Procurar atualizações",
+        "Check for updates on start": "Procurar atualizações ao abrir",
+        "WayClick {v} is available — you have {cur}.":
+            "WayClick {v} disponível — você tem a {cur}.",
+        "Download": "Baixar",
+        "Dismiss until next launch": "Esconder até a próxima abertura",
+        "You are up to date ({v}).": "Você já está na versão mais recente ({v}).",
+        "Could not check for updates.":
+            "Não foi possível procurar atualizações.",
+        "+ Add key": "+ Adicionar tecla",
+        "Remove this key": "Remover esta tecla",
+        "Two rows use the same key; only the first one runs.":
+            "Duas linhas usam a mesma tecla; só a primeira roda.",
+        "No trigger (hotkey toggles)": "Sem gatilho (o atalho liga/desliga)",
         "Runs while hotkey is held": "Age enquanto o atalho é segurado",
         "Runs while mouse button is held":
             "Age enquanto o botão do mouse é segurado",
@@ -1680,7 +1827,7 @@ def set_autostart(on):
 # ------------------------------------------------------------------ UI ------
 # "Runs" e não "Clicks": o modo gateia tudo o que estiver ligado — clique,
 # macro de teclado e tecla direcionada —, não só o clique.
-MODES = {"Hotkey toggles": "toggle",
+MODES = {"No trigger (hotkey toggles)": "toggle",
          "Runs while hotkey is held": "hotkey_hold",
          "Runs while mouse button is held": "mouse_hold"}
 CFG = os.path.join(XDG_CONFIG, "wayclick.json")
@@ -1695,7 +1842,7 @@ class App(QWidget):
         self.mouse = None
         self.keyboard = None
         self.clicker = None
-        self.keymacro = None
+        self.keymacros = []
         self.antiafk = None
         self.running = False
 
@@ -1712,6 +1859,13 @@ class App(QWidget):
 
         global LANG
         LANG = cfg.get("language") or default_language()
+        self.update_auto = bool(cfg.get("update_check", True))
+        self._update_tag = cfg.get("update_tag", "")
+        self._update_url = cfg.get("update_url") or HOMEPAGE
+        self._update_last = float(cfg.get("update_last", 0) or 0)
+        self._update_hidden = False      # o × vale só nesta sessão
+        self._update_told = False
+        self._manual_check = False
         self.theme = cfg.get("theme", "System")
         self.tray_style = cfg.get("tray_style", "Cursor")
         self.tray_color = cfg.get("tray_color", "Match state")
@@ -1765,27 +1919,17 @@ class App(QWidget):
         self.autostart.setChecked(autostart_enabled())
         self.autostart.toggled.connect(self._toggle_autostart)
 
-        # --- macro de teclado ---
-        self.key_sel = KeyCatcher(cfg.get("key_code", KEYS["Space"]),
-                                  cfg.get("key", "Space"))
-        self.key_interval = QDoubleSpinBox()
-        self.key_interval.setRange(1.0, 10000.0)
-        self.key_interval.setDecimals(0)
-        self.key_interval.setSingleStep(50.0)
-        self.key_interval.setSuffix(" ms")
-        self.key_interval.setValue(cfg.get("key_interval_ms", 200.0))
-        self.key_mode = QComboBox()
-        for label in ("Repeat", "Hold"):
-            self.key_mode.addItem(_(label), label)
-        self.key_mode.setCurrentIndex(
-            max(0, self.key_mode.findData(cfg.get("key_mode", "Repeat"))))
-        self.key_mode.currentIndexChanged.connect(
-            lambda: self.key_interval.setEnabled(
-                self.key_mode.currentData() == "Repeat"))
-        self.key_interval.setEnabled(self.key_mode.currentData() == "Repeat")
-
         self._labels = []            # (widget, texto-fonte) para retraduzir
         self._hints = []
+
+        # --- macro de teclado: uma tecla por linha ---
+        self.key_rows = []
+        self.key_list = QVBoxLayout()
+        self.key_list.setContentsMargins(0, 0, 0, 0)
+        self.key_add = QPushButton(_("+ Add key"))
+        self.key_add.clicked.connect(lambda: self._add_key_row())
+        for spec in self._key_specs(cfg):
+            self._add_key_row(spec)
         click_form = QFormLayout()
         self._row(click_form, "Mouse:", dev_row)
         self._row(click_form, "Interval:", self.interval)
@@ -1794,17 +1938,48 @@ class App(QWidget):
         self.click_box = QCheckBox(_("Enable clicking"))
         self.click_box.setChecked(cfg.get("click_enabled", True))
 
-        key_form = QFormLayout()
-        self._row(key_form, "Key:", self.key_sel)
-        self._row(key_form, "Interval:", self.key_interval)
-        self._row(key_form, "Action:", self.key_mode)
+        key_form = QVBoxLayout()
+        head = QHBoxLayout()
+        for text, width in (("Key:", 0), ("Interval:", 96), ("Action:", 96)):
+            lbl = QLabel(_(text))
+            self._labels.append((lbl, text))
+            if width:
+                lbl.setFixedWidth(width)
+                head.addWidget(lbl)
+            else:
+                head.addWidget(lbl, 1)
+        head.addSpacing(34)          # alinha com a coluna do botão de remover
+        key_form.addLayout(head)
+        key_form.addLayout(self.key_list)
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.key_add)
+        add_row.addStretch()
+        key_form.addLayout(add_row)
         self.key_box = QCheckBox(_("Enable the keyboard macro"))
         self.key_box.setChecked(cfg.get("key_enabled", False))
         self.key_box.toggled.connect(self._key_box_toggled)
         self.click_box.toggled.connect(self._click_box_toggled)
 
+        # Quem o gatilho segura. Sem isso o modo é tudo ou nada, e "segurar o
+        # botão para clicar, com a macro rodando o tempo todo" — ou o contrário
+        # — não existia. Só vale no mouse_hold: os outros modos decidem a
+        # rodada inteira, não o que roda dentro dela.
+        self.trig_boxes = {}
+        scope_row = QHBoxLayout()
+        scope = cfg.get("trigger_scope") or {}
+        for name, label in (("click", "Click"), ("key", "Keyboard"),
+                            ("window", "Window")):
+            box = QCheckBox(_(label))
+            box.setChecked(bool(scope.get(name, True)))
+            box.toggled.connect(self._scope_changed)
+            self.trig_boxes[name] = box
+            self._labels.append((box, label))
+            scope_row.addWidget(box)
+        scope_row.addStretch()
+
         form = QFormLayout()
         self._row(form, "Mode:", self.mode)
+        self.scope_lbl = self._row(form, "Trigger holds:", scope_row)
         self._row(form, "Start delay:", self.delay)
         self._row(form, "Auto-stop after:", self.duration)
         self._row(form, "Global hotkey:", self.hk)
@@ -1858,7 +2033,7 @@ class App(QWidget):
 
         self.status = QLabel(_("Stopped"))
         self.status.setAlignment(Qt.AlignCenter)
-        self.btn = QPushButton(_("Start"))
+        self.btn = QPushButton(self._start_label())
         self.btn.setMinimumHeight(46)
         self.btn.clicked.connect(lambda: self.set_running(not self.running))
 
@@ -1891,8 +2066,28 @@ class App(QWidget):
         for w_ in (self.click_box, self.key_box, self.target_box):
             w_.toggled.connect(self._sync_tabs)
 
+        # barra de atualização: escondida até existir versão nova
+        self.update_bar = QFrame()
+        self.update_bar.setFrameShape(QFrame.StyledPanel)
+        self.update_lbl = QLabel("")
+        self.update_lbl.setWordWrap(True)
+        self.update_lbl.setStyleSheet("color:#3daee9;font-weight:bold;")
+        self.update_btn = QPushButton(_("Download"))
+        self.update_btn.clicked.connect(self._open_update)
+        self.update_x = QPushButton("×")
+        self.update_x.setFixedWidth(26)
+        self.update_x.setToolTip(_("Dismiss until next launch"))
+        self.update_x.clicked.connect(self._dismiss_update)
+        up_row = QHBoxLayout(self.update_bar)
+        up_row.setContentsMargins(8, 4, 8, 4)
+        up_row.addWidget(self.update_lbl, 1)
+        up_row.addWidget(self.update_btn)
+        up_row.addWidget(self.update_x)
+        self.update_bar.hide()
+
         outer = QVBoxLayout(self)
         outer.setMenuBar(self._build_menu())
+        outer.addWidget(self.update_bar)
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self.status)
         outer.addWidget(self.btn)
@@ -1954,6 +2149,17 @@ class App(QWidget):
                     "Until then the hotkey only works with this window "
                     "focused."))
         self._hint()
+        self._sync_scope()
+
+        # o aviso aparece já com o que estava em cache: quem instalou por
+        # pacote não tem outro lugar onde essa informação chegue. A consulta
+        # em si é no máximo uma por dia, e nunca atrasa a abertura.
+        self.updater = UpdateCheck()
+        self.updater.done.connect(self._update_done)
+        self._show_update()
+        if (AUTO_UPDATE_CHECK and self.update_auto
+                and time.time() - self._update_last > UPDATE_EVERY):
+            self.updater.start()
 
     # ---------------------------------------------------------- helpers --
     def _rate_str(self):
@@ -1970,12 +2176,23 @@ class App(QWidget):
             return
         self._hinted = True
         hk, btn = self.hk.currentText(), self.btn_sel.currentText()
-        if self.mode_key() == "mouse_hold":
+        if self.mode_key() == "mouse_hold" and self.click_box.isChecked():
             self.warn.setText(_(
                 "Hold mode: while armed, your {btn} mouse button is captured "
                 "and turned into the click stream — hold it to autoclick, "
                 "release to stop. {hk} arms/disarms; Esc disarms.",
                 btn=btn.lower(), hk=hk))
+        elif self.mode_key() == "mouse_hold":
+            self.warn.setText(_(
+                "Trigger is the {btn} mouse button: arming runs nothing until "
+                "you hold it. To run the moment you press Arm, set Mode to "
+                "'No trigger' — or untick it under 'Trigger holds'.",
+                btn=btn.lower()))
+        elif self.mode_key() == "hotkey_hold":
+            self.warn.setText(_(
+                "Trigger is {hk} held down: arming runs nothing until you hold "
+                "it. To run the moment you press Arm, set Mode to "
+                "'No trigger'.", hk=hk))
         else:
             self.warn.setText(_(
                 "Move the cursor off this window before starting — otherwise "
@@ -2013,8 +2230,11 @@ class App(QWidget):
 
     def _sync_tabs(self):
         """Marca a aba cuja engine está ligada, para saber sem abrir."""
+        # a aba do gatilho também marca: um modo que não é "liga e desliga"
+        # decide se as outras três chegam a rodar, e isso precisa ser visível
+        # sem abrir a aba
         on = [self.click_box.isChecked(), self.key_box.isChecked(),
-              self.target_box.isChecked(), None]
+              self.target_box.isChecked(), self.mode_key() != "toggle"]
         for i, name in enumerate(self._tab_names):
             mark = "● " if on[i] else ""
             self.tabs.setTabText(i, mark + _(name))
@@ -2038,7 +2258,7 @@ class App(QWidget):
     def _build_menu(self):
         bar = QMenuBar()
         self.m_file = bar.addMenu(_("File"))
-        self.act_run = self.m_file.addAction(_("Start"))
+        self.act_run = self.m_file.addAction(self._start_label())
         self.act_run.triggered.connect(lambda: self.set_running(not self.running))
         self.act_hide = self.m_file.addAction(_("Hide to tray"))
         self.act_hide.triggered.connect(self.hide)
@@ -2088,6 +2308,10 @@ class App(QWidget):
         self.act_auto.setCheckable(True)
         self.act_auto.toggled.connect(self.autostart.setChecked)
         self.autostart.toggled.connect(self.act_auto.setChecked)
+        self.act_updates = self.m_set.addAction(_("Check for updates on start"))
+        self.act_updates.setCheckable(True)
+        self.act_updates.setChecked(self.update_auto)
+        self.act_updates.toggled.connect(self._set_update_auto)
 
         for n, act in self.theme_acts.items():
             act.setChecked(n == self.theme)
@@ -2097,6 +2321,9 @@ class App(QWidget):
         self.act_auto.setChecked(self.autostart.isChecked())
 
         self.m_help = bar.addMenu(_("Help"))
+        self.act_update = self.m_help.addAction(_("Check for updates"))
+        self.act_update.triggered.connect(self._check_updates_now)
+        self.m_help.addSeparator()
         self.act_site = self.m_help.addAction(_("Project on GitHub"))
         self.act_site.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl(HOMEPAGE)))
@@ -2153,7 +2380,9 @@ class App(QWidget):
         self.duration.setSpecialValueText(_("never"))
         self._retext(self.mode, list(MODES.keys()))
         self._retext(self.btn_sel, list(BTN.keys()))
-        self._retext(self.key_mode, ["Repeat", "Hold"])
+        for row in self.key_rows:
+            row.retranslate()
+        self.key_add.setText(_("+ Add key"))
         self.m_file.setTitle(_("File"))
         self.m_set.setTitle(_("Settings"))
         self.m_theme.setTitle(_("Theme"))
@@ -2172,10 +2401,14 @@ class App(QWidget):
         self.act_site.setText(_("Project on GitHub"))
         self.act_sound.setText(_("Sound feedback on hotkey"))
         self.act_auto.setText(_("Start with system"))
+        self.act_updates.setText(_("Check for updates on start"))
+        self.act_update.setText(_("Check for updates"))
+        self.update_btn.setText(_("Download"))
+        self.update_x.setToolTip(_("Dismiss until next launch"))
+        self._show_update()
         for name, act in self.theme_acts.items():
             act.setText(_(name))
-        self.btn.setText(_("Stop") if self.running else _("Start"))
-        self.act_run.setText(_("Stop") if self.running else _("Start"))
+        self._sync_start_label()
         self.warn.setText("")
         self._hinted = False
         self._hint()
@@ -2289,6 +2522,54 @@ class App(QWidget):
         self.act_window.setText(_("Hide window") if self.isVisible()
                                 else _("Show window"))
 
+    # ------------------------------------------------------- updates --
+    def _set_update_auto(self, on):
+        self.update_auto = on
+        if on:
+            self.updater.start()
+
+    def _check_updates_now(self):
+        """Checagem pedida no menu: responde mesmo quando não há novidade —
+        silêncio, aqui, é indistinguível de falha."""
+        self._manual_check = True
+        self._update_hidden = False
+        self.updater.start()
+
+    @Slot(str, str)
+    def _update_done(self, tag, link):
+        if tag:
+            self._update_tag, self._update_url = tag, link
+            self._update_last = time.time()
+        self._show_update()
+        if self._manual_check:
+            self._manual_check = False
+            if not newer_version(self._update_tag):
+                QMessageBox.information(
+                    self, _("Check for updates"),
+                    _("You are up to date ({v}).", v=VERSION) if tag
+                    else _("Could not check for updates."))
+
+    def _show_update(self):
+        newer = newer_version(self._update_tag)
+        if not newer or self._update_hidden:
+            self.update_bar.hide()
+            return
+        text = _("WayClick {v} is available — you have {cur}.",
+                 v=newer.lstrip("vV"), cur=VERSION)
+        self.update_lbl.setText(text)
+        self.update_bar.show()
+        # com a janela escondida (--tray) a barra não serve para nada
+        if self.tray and not self.isVisible() and not self._update_told:
+            self._update_told = True
+            self.tray.showMessage(_("WayClick"), text, wayclick_icon())
+
+    def _dismiss_update(self):
+        self._update_hidden = True
+        self.update_bar.hide()
+
+    def _open_update(self):
+        QDesktopServices.openUrl(QUrl(self._update_url or HOMEPAGE))
+
     def _toggle_autostart(self, on):
         if not set_autostart(on):
             self.warn.setText("Could not write " + AUTOSTART)
@@ -2296,11 +2577,29 @@ class App(QWidget):
     def mode_key(self):
         return self.mode.currentData()
 
+    def _start_label(self):
+        """Nos modos com gatilho, apertar o botão não começa nada — só arma, e
+        quem dispara é o botão do mouse ou o atalho. Chamar isso de "Start" é o
+        que fez a macro de teclado parecer quebrada: o usuário aperta, nada
+        acontece, e a explicação está numa aba que ele não tinha por que abrir.
+        """
+        return _("Arm") if self.mode_key() != "toggle" else _("Start")
+
+    def _sync_start_label(self):
+        if not hasattr(self, "btn"):
+            return
+        label = _("Stop") if self.running else self._start_label()
+        self.btn.setText(label)
+        self.act_run.setText(label)
+
     def _mode_changed(self, _text):
         self.set_running(False)
         self.warn.setText("")
         self._hinted = False
         self._hint()
+        self._sync_scope()
+        self._sync_tabs()
+        self._sync_start_label()
 
     def _beep(self, which):
         if self.sound.isChecked():
@@ -2381,8 +2680,7 @@ class App(QWidget):
                                     "macro or Send key to a window."))
                 return
             self.running = True
-            self.btn.setText(_("Stop"))
-            self.act_run.setText(_("Stop"))
+            self._sync_start_label()
             self._burst_start()
             self._beep("on")
             self._left = self.delay.value()
@@ -2402,8 +2700,7 @@ class App(QWidget):
                 self.holder = None
             self._state = ""
             self._show_status()
-            self.btn.setText(_("Start"))
-            self.act_run.setText(_("Start"))
+            self._sync_start_label()
             self._burst_start()
             self._beep("off")
         self._paint_status()
@@ -2416,22 +2713,51 @@ class App(QWidget):
             self.countdown.stop()
             self._engage()
 
+    # ---------------------------------------------------------- engines --
+    ENGINES = ("click", "key", "window")
+
+    def _enabled_engines(self):
+        return {name for name, box in (("click", self.click_box),
+                                       ("key", self.key_box),
+                                       ("window", self.target_box))
+                if box.isChecked()}
+
+    def _gated_engines(self):
+        """O que o gatilho segura. Só o mouse_hold gateia DENTRO da rodada; nos
+        outros modos o gatilho decide a rodada inteira, e escopo não se
+        aplica."""
+        enabled = self._enabled_engines()
+        if self.mode_key() != "mouse_hold":
+            return enabled
+        return {n for n, box in self.trig_boxes.items()
+                if box.isChecked()} & enabled
+
     def _engage(self):
-        """Fim do atraso: sai clicando, ou arma a captura do botão do mouse."""
+        """Fim do atraso: o que o gatilho não segura já sai rodando; o resto
+        espera o botão."""
         self._remain = self.duration.value()
         if self._remain:
             self.autostop.start()
-        if self.mode_key() == "mouse_hold":
+        gated = self._gated_engines()
+        free = self._enabled_engines() - gated
+        if free:
+            self._start_engines(free)
+        if not gated:
+            self._state = "run"
+            self._show_status()
+            self._paint_status()
+        elif self.mode_key() == "mouse_hold":
             self._arm_hold()
         else:
-            self._start_clicking()
+            self._start_engines(gated)
 
     def _arm_hold(self):
         path = self.selected_mouse()[0]
+        # engolir o gatilho só quando é o Clicker que o substitui
         self.holder = MouseHold(self.mouse, BTN[self.btn_sel.currentData()],
                                 only=[path] if path else None,
-                                swallow=self.click_box.isChecked())
-        self.holder.pressed.connect(self._start_clicking)
+                                swallow="click" in self._gated_engines())
+        self.holder.pressed.connect(self._trigger_pressed)
         self.holder.released.connect(self._hold_released)
         self.holder.failed.connect(self._hold_failed)
         if not self.holder.start():
@@ -2445,41 +2771,126 @@ class App(QWidget):
         self.warn.setText(_("Hold mode unavailable: {msg}", msg=_(msg)))
         self.set_running(False)
 
+    def _trigger_pressed(self):
+        self._start_engines(self._gated_engines())
+
     def _hold_released(self):
-        self._stop_clicker()
+        """Solta o gatilho: para só o que ele segura. O que roda livre segue."""
+        self._stop_engines(self._gated_engines())
         if self.running:
-            self._state = "armed"
+            self._state = "armed" if self._gated_engines() else "run"
             self._show_status()
             self._paint_status()
 
-    def _start_clicking(self):
-        """Liga o que estiver habilitado: cliques, macro de teclado e/ou a
-        tecla direcionada a uma janela."""
-        if self.clicker or self.keymacro or self.target_timer.isActive():
-            return
-        if self.click_box.isChecked():
+    def _start_engines(self, names):
+        """Liga as engines pedidas, sem mexer nas que já estão rodando."""
+        if "click" in names and not self.clicker:
             self.clicker = Clicker(self.mouse, self.interval.value(),
                                    BTN[self.btn_sel.currentData()])
             self.clicker.start()
-        if self.key_box.isChecked() and self.ensure_keyboard():
-            self.keymacro = KeyMacro(self.keyboard, self.key_interval.value(),
-                                     self.key_sel.code,
-                                     self.key_mode.currentData() == "Hold")
-            self.keymacro.start()
-        self._state = "run"
-        if self.target_box.isChecked():
+        if "key" in names and not self.keymacros:
+            self._start_key_macros()
+        if "window" in names and not self.target_timer.isActive():
             self._target_start()
+        self._state = "run"
         self._show_status()
         self._paint_status()
 
-    def _stop_clicker(self):
-        self.target_timer.stop()
-        if self.clicker:
+    def _stop_engines(self, names):
+        if "window" in names:
+            self.target_timer.stop()
+        if "click" in names and self.clicker:
             self.clicker.stop()
             self.clicker = None
-        if self.keymacro:
-            self.keymacro.stop()
-            self.keymacro = None
+        if "key" in names:
+            self._stop_key_macros()
+
+    def _stop_clicker(self):
+        self._stop_engines(self.ENGINES)
+
+    # -------------------------------------------------- teclas da macro --
+    MAX_KEYS = 8
+
+    @staticmethod
+    def _key_specs(cfg):
+        """Config nova é uma lista de teclas; a antiga tinha uma só, em campos
+        soltos. Ler as duas mantém quem atualiza com o que já tinha."""
+        rows = cfg.get("keys")
+        if isinstance(rows, list) and rows:
+            return rows[:App.MAX_KEYS]
+        return [{"key": cfg.get("key", "Space"),
+                 "key_code": cfg.get("key_code", KEYS["Space"]),
+                 "interval_ms": cfg.get("key_interval_ms", 200.0),
+                 "mode": cfg.get("key_mode", "Repeat")}]
+
+    def _add_key_row(self, spec=None):
+        if len(self.key_rows) >= self.MAX_KEYS:
+            return None
+        spec = spec or {}
+        row = KeyRow(spec.get("key_code", KEYS["Space"]),
+                     spec.get("key", "Space"),
+                     spec.get("interval_ms", 200.0),
+                     spec.get("mode", "Repeat"))
+        row.removed.connect(self._remove_key_row)
+        row.changed.connect(self._keys_changed)
+        self.key_rows.append(row)
+        self.key_list.addWidget(row)
+        self._sync_key_rows()
+        self._keys_changed()
+        return row
+
+    def _remove_key_row(self, row):
+        if len(self.key_rows) <= 1:
+            return                      # a macro sempre tem ao menos uma tecla
+        self.key_rows.remove(row)
+        self.key_list.removeWidget(row)
+        row.setParent(None)
+        row.deleteLater()
+        self._sync_key_rows()
+        self._keys_changed()
+
+    def _sync_key_rows(self):
+        alone = len(self.key_rows) <= 1
+        for r in self.key_rows:
+            r.minus.setEnabled(not alone)
+        self.key_add.setEnabled(len(self.key_rows) < self.MAX_KEYS)
+
+    def _keys_changed(self):
+        """Mexer nas teclas com a macro rodando vale na hora: recriar as
+        threads é barato, e exigir parar e começar de novo não se justifica."""
+        if not hasattr(self, "warn"):
+            return                      # ainda montando a janela
+        if self.keymacros:
+            self._stop_key_macros()
+            self._start_key_macros()
+        self._show_status()
+
+    def _start_key_macros(self):
+        """Uma thread por tecla. Duas linhas na mesma tecla brigariam pelo
+        estado dela — uma segura, a outra solta —, então só a primeira vale."""
+        if not self.ensure_keyboard():
+            return
+        if self.keymacros:
+            return
+        seen, dup = set(), False
+        for row in self.key_rows:
+            code = row.catcher.code
+            if code in seen:
+                dup = True
+                continue
+            seen.add(code)
+            macro = KeyMacro(self.keyboard, row.interval.value(), code,
+                             row.mode.currentData() == "Hold")
+            macro.start()
+            self.keymacros.append(macro)
+        if dup:
+            self.warn.setText(_("Two rows use the same key; only the first "
+                                "one runs."))
+
+    def _stop_key_macros(self):
+        for macro in self.keymacros:
+            macro.stop()
+        self.keymacros = []
 
     # ---------------------------------------------------------- teclado --
     def ensure_keyboard(self):
@@ -2495,6 +2906,9 @@ class App(QWidget):
         """Ligar/desligar o clique vale na hora, sem exigir parar e começar de
         novo — e desligar só derruba o clique, não a macro nem a tecla alvo."""
         self._sync_hold_swallow(on)
+        if hasattr(self, "warn"):
+            self._hinted = False
+            self._hint()
         if not (self.running and self._state == "run"):
             return
         if on and not self.clicker:
@@ -2506,11 +2920,27 @@ class App(QWidget):
             self.clicker = None
         self._show_status()
 
-    def _sync_hold_swallow(self, on):
-        """Sem clique não há quem reemita o botão-gatilho: o relay tem que
-        deixá-lo passar, senão o botão do usuário morre enquanto armado."""
+    def _sync_hold_swallow(self, _on=None):
+        """Sem clique preso ao gatilho não há quem reemita o botão: o relay tem
+        que deixá-lo passar, senão o botão do usuário morre enquanto armado."""
         if self.holder:
-            self.holder.swallow = on
+            self.holder.swallow = "click" in self._gated_engines()
+
+    def _scope_changed(self, _on=False):
+        """Mudar o escopo com algo armado refaz o arranjo: mais simples, e mais
+        honesto, do que remanejar engines no meio da rodada."""
+        if not hasattr(self, "warn"):
+            return                      # ainda montando a janela
+        self.set_running(False)
+        self._sync_tabs()
+
+    def _sync_scope(self):
+        """Escopo só existe no mouse_hold: nos outros modos o gatilho decide a
+        rodada inteira, não o que roda dentro dela."""
+        on = self.mode_key() == "mouse_hold"
+        self.scope_lbl.setEnabled(on)
+        for box in self.trig_boxes.values():
+            box.setEnabled(on)
 
     def _key_box_toggled(self, on):
         """Cria/destroi o device só quando a macro é ligada — evita deixar um
@@ -2521,15 +2951,10 @@ class App(QWidget):
         """
         if on:
             self.ensure_keyboard()
-            if self.running and self._state == "run" and not self.keymacro:
-                self.keymacro = KeyMacro(self.keyboard, self.key_interval.value(),
-                                         self.key_sel.code,
-                                         self.key_mode.currentData() == "Hold")
-                self.keymacro.start()
+            if self.running and self._state == "run":
+                self._start_key_macros()
         else:
-            if self.keymacro:
-                self.keymacro.stop()
-                self.keymacro = None
+            self._stop_key_macros()
             # a janela alvo pura Wayland injeta pelo mesmo teclado virtual:
             # só fechar o device quando ninguém mais depende dele
             if self.keyboard and not self.target_box.isChecked():
@@ -2692,21 +3117,27 @@ class App(QWidget):
         if self.afk.isChecked():
             self._afk_toggled(True)
 
+    def _running_parts(self):
+        """O que está rodando agora, curto, para a linha de status."""
+        parts = [self._rate_str()] if self.clicker else []
+        for macro in self.keymacros:
+            parts.append(key_label(macro.code) + " "
+                         + (_("held") if macro.hold
+                            else f"{macro.interval * 1000:.0f} ms"))
+        return parts
+
     def _show_status(self):
         state = getattr(self, "_state", "")
         if state == "armed":
             txt = "◆ " + _("ARMED — hold {btn} mouse button",
                            btn=self.btn_sel.currentText().lower())
+            free = self._running_parts()
+            if free:                    # o que o gatilho não segura já roda
+                txt += "  (" + " + ".join(free) + ")"
         elif state == "run":
-            parts = []
-            if self.clicker:
-                parts.append(self._rate_str())
-            if self.keymacro:
-                parts.append(f"{self.key_sel.name} "
-                             + (_("held") if self.keymacro.hold
-                                else f"{self.key_interval.value():.0f} ms"))
             txt = ("● " + _("RUNNING") + "  ("
-                   + " + ".join(parts or [_("nothing enabled")]) + ")")
+                   + " + ".join(self._running_parts() or [_("nothing enabled")])
+                   + ")")
         else:
             txt = _("Stopped")
         if self._remain:
@@ -2776,14 +3207,23 @@ class App(QWidget):
                            "mouse_name": self.selected_mouse()[1],
                            "click_enabled": self.click_box.isChecked(),
                            "key_enabled": self.key_box.isChecked(),
-                           "key": self.key_sel.name,
-                           "key_code": self.key_sel.code,
-                           "key_interval_ms": self.key_interval.value(),
-                           "key_mode": self.key_mode.currentData(),
+                           "keys": [r.spec() for r in self.key_rows],
+                           # a primeira tecla também nos campos antigos: uma
+                           # versão anterior ainda lê a config sem se perder
+                           "key": self.key_rows[0].catcher.name,
+                           "key_code": self.key_rows[0].catcher.code,
+                           "key_interval_ms": self.key_rows[0].interval.value(),
+                           "key_mode": self.key_rows[0].mode.currentData(),
+                           "trigger_scope": {n: b.isChecked() for n, b
+                                             in self.trig_boxes.items()},
                            "afk_seconds": self.afk_secs.value(),
                            "target_key": self.win_key.name,
                            "target_key_code": self.win_key.code,
                            "target_seconds": self.win_secs.value(),
+                           "update_check": self.update_auto,
+                           "update_tag": self._update_tag,
+                           "update_url": self._update_url,
+                           "update_last": self._update_last,
                            "theme": self.theme,
                            "tray_style": self.tray_style,
                            "tray_color": self.tray_color,

@@ -17,10 +17,13 @@ running as root.
   delivery on the receiving window
 - **Global hotkey** that works even when the window is not focused
 - **Hold mode** — clicks only while you physically hold the mouse button
-- **Keyboard macro** — any key, captured the way shortcuts are set; repeat or hold
+- **Keyboard macro** — up to eight keys at once, each captured the way
+  shortcuts are set, each with its own interval; repeat or hold
 - **Send key to a window** — pick an open window and feed it a key; for X11
   targets it arrives with no focus change, even minimized
 - **Anti-AFK** — nudges the pointer and puts it back, with zero drift
+- **Update check** — tells you a new release is out, from GitHub or GitLab,
+  without you going to look
 - **Tray icon** in four shapes and ten colors, pulsing while it works and
   flashing when you start it; autostart, your system color schemes, English and
   Portuguese
@@ -180,6 +183,14 @@ the interval you set, `Hold` presses it once and keeps it down. The key is
 always released on stop, on quit, and if the process dies — it never stays
 stuck.
 
+**+ Add key** gives you another line, up to eight. Each line is a key, an
+interval and an action of its own, and each runs on its own thread — which is
+the point: moving with `W` every second while `Space` fires every 50 ms is one
+macro, not two settings fighting over one interval. Lines can be added and
+removed while it runs, and `−` takes one out; the last line stays. Two lines on
+the same key would fight over its state, so only the first of them runs and the
+status line says so.
+
 One thing to expect in `Hold`: holding a normal key makes the system's own key
 repeat kick in, exactly as if you held it on your keyboard. Modifiers (Shift,
 Ctrl, Alt, Super) do not repeat, so they stay cleanly held.
@@ -188,10 +199,21 @@ Ctrl, Alt, Super) do not repeat, so they stay cleanly held.
 
 **Mode**
 
-- `Hotkey toggles` — press the hotkey to start, press again to stop.
+- `No trigger (hotkey toggles)` — Start runs it; the hotkey toggles it too.
 - `Runs while hotkey is held` — runs only while the key stays down.
 - `Runs while mouse button is held` — arm it, then it runs only while you
   physically hold the mouse button. Release and it stops, still armed.
+
+The mode gates **everything that is enabled**, not just clicking, and the
+button below says which of the two it will do: **Start** when there is no
+trigger, **Arm** when there is one. The Trigger tab carries a dot whenever a
+trigger is set, the same way the other tabs mark what they have enabled.
+
+**Trigger holds** — which engines wait for the trigger. Untick one and it runs
+the moment you press Arm, while the ticked ones still wait for the button. Hold
+the mouse button to autoclick while the keyboard macro runs the whole time, or
+the reverse. It only applies to `Runs while mouse button is held`: the other
+modes decide the whole run rather than what happens inside it.
 
 **Start delay** — seconds before it begins. Move the cursor off the window
 first, otherwise the autoclicker clicks its own Stop button.
@@ -235,6 +257,26 @@ Then it shows up as ⌨ and takes the key directly. Two honest caveats: an app
 that reads raw input may ignore synthetic X11 events, and this is keyboard
 only — clicks follow the cursor rather than focus, so aiming them at a window
 would mean warping your pointer.
+
+### Updates
+
+Installed from a package or `install.sh`, there is nowhere a new version would
+announce itself — so WayClick asks the repository. When a release is newer than
+what you are running, a bar appears at the top with a **Download** button that
+opens that release; `×` hides it until the next launch, on purpose: the whole
+point is that it tells you *every* time you open it, until you update. Started
+with `--tray`, the notice arrives as a tray message instead, since there is no
+window to put a bar on.
+
+It asks GitHub first and falls back to GitLab — the project lives in both and
+either answers without a login. The reply is cached and the question is asked
+at most once a day, never on the UI thread, so a slow network cannot delay the
+window opening. **Help > Check for updates** asks right now and answers even
+when there is nothing new; **Settings > Check for updates on start** turns the
+automatic check off, and then nothing is requested at all.
+
+Nothing is downloaded or installed for you: the button opens the release page
+and you update the way you installed it.
 
 ### Anti-AFK
 
@@ -329,6 +371,9 @@ input devices and measure real behaviour. Run them from the project root:
 ```bash
 sg input -c "python3 tests/t_hold.py"        # hold mode end to end, with a fake mouse
 sg input -c "python3 tests/t_hold_keyonly.py"  # hold mode driving only the keyboard macro
+sg input -c "python3 tests/t_trigger_scope.py" # keyboard free while clicking waits for the button
+python3 tests/t_multikey.py                  # several keys at once, each on its own interval
+python3 tests/t_update.py                    # update notice: compare, cache, and the bar
 sg input -c "python3 tests/t_clone.py"       # asks KWin over D-Bus if the clone inherited your settings
 sg input -c "python3 tests/t_hotkey.py"      # global hotkey, with a fake keyboard
 sg input -c "python3 tests/t_relay_lat.py"   # relay latency under a 10 kHz click load

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
+a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
 import os as _os                       # config isolada e limpa por teste
 a.CFG = f"/tmp/autoclick-test-{_os.path.basename(__file__)}.json"
 _os.path.exists(a.CFG) and _os.remove(a.CFG)
@@ -28,9 +29,10 @@ app.aboutToQuit.connect(w.cleanup)
 w.sound.setChecked(False)
 w.click_box.setChecked(False)          # só teclado neste teste
 w.key_box.setChecked(True)
-w.key_sel.set_key(a.KEYS["Space"], "Space")
-w.key_interval.setValue(50.0)
-w.key_mode.setCurrentText("Repeat")
+row = w.key_rows[0]                    # a macro agora e uma lista de teclas
+row.catcher.set_key(a.KEYS["Space"], "Space")
+row.interval.setValue(50.0)
+row.mode.setCurrentText("Repeat")
 w.delay.setValue(0); w.duration.setValue(0)
 
 R = {}
@@ -42,14 +44,14 @@ def phase_repeat():
     QTimer.singleShot(1200, lambda: (
         R.__setitem__("repeat", {k: (got[k] - R["base"][k]) if k != "keys"
                                  else None for k in got}),
-        R.__setitem__("emitted", w.keymacro.count),
+        R.__setitem__("emitted", w.keymacros[0].count),
         w.set_running(False),
         QTimer.singleShot(400, phase_hold)))
 
 
 def phase_hold():
-    w.key_mode.setCurrentText("Hold")
-    w.key_sel.set_key(a.KEYS["Left Shift"], "Left Shift")   # modificador: nao tem auto-repeat
+    row.mode.setCurrentText("Hold")
+    row.catcher.set_key(a.KEYS["Left Shift"], "Left Shift")  # modificador: nao tem auto-repeat
     base = dict(got)
     w.set_running(True)
     QTimer.singleShot(900, lambda: (

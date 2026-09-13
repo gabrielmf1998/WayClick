@@ -18,10 +18,13 @@ compositor e sem nada rodando como root.
   de entrega na janela que recebe
 - **Atalho global** que funciona mesmo com a janela fora de foco
 - **Modo segurar** — só clica enquanto você segura o botão do mouse
-- **Macro de teclado** — qualquer tecla, capturada como se define um atalho; repetindo ou segurando
+- **Macro de teclado** — até oito teclas ao mesmo tempo, cada uma capturada
+  como se define um atalho e com o seu próprio intervalo; repetindo ou segurando
 - **Mandar tecla para uma janela** — escolha uma janela aberta e alimente ela
   com uma tecla; em alvo X11 chega sem mexer no foco, mesmo minimizada
 - **Anti-AFK** — mexe o ponteiro e devolve, com deriva zero
+- **Aviso de atualização** — avisa que saiu release nova, do GitHub ou do
+  GitLab, sem você ir olhar
 - **Ícone na bandeja** em quatro formatos e dez cores, pulsando enquanto
   trabalha e piscando ao ligar; iniciar com o sistema, os esquemas de cor do
   seu sistema, inglês e português
@@ -180,6 +183,14 @@ qualquer tecla do teclado serve. Depois escolha a **ação**: `Repetir` bate no
 intervalo definido, `Segurar` aperta uma vez e mantém pressionada. A tecla é
 sempre solta ao parar, ao sair e mesmo se o processo morrer — nunca fica presa.
 
+**+ Adicionar tecla** dá mais uma linha, até oito. Cada linha tem tecla,
+intervalo e ação próprios, e roda na sua própria thread — que é o ponto: andar
+com `W` a cada segundo enquanto `Espaço` sai a cada 50 ms é uma macro só, não
+duas configurações brigando pelo mesmo intervalo. Dá para adicionar e remover
+linha com a macro rodando, e o `−` tira uma; a última fica. Duas linhas na
+mesma tecla brigariam pelo estado dela, então só a primeira roda, e a linha de
+status avisa.
+
 Uma coisa esperada no `Segurar`: manter uma tecla normal pressionada aciona a
 repetição automática do próprio sistema, igualzinho a segurar no teclado.
 Modificadores (Shift, Ctrl, Alt, Super) não repetem, então ficam limpos.
@@ -188,11 +199,23 @@ Modificadores (Shift, Ctrl, Alt, Super) não repetem, então ficam limpos.
 
 **Modo**
 
-- `Atalho liga e desliga` — aperta para começar, aperta de novo para parar.
+- `Sem gatilho (o atalho liga/desliga)` — o Start roda; o atalho também alterna.
 - `Age enquanto o atalho é segurado` — roda só enquanto a tecla estiver
   pressionada.
 - `Age enquanto o botão do mouse é segurado` — arme, e ele roda só enquanto você
   segurar fisicamente o botão. Ao soltar, para, mas continua armado.
+
+O modo segura **tudo o que estiver ligado**, não só o clique, e o botão logo
+abaixo diz qual das duas coisas vai fazer: **Start** quando não há gatilho,
+**Armar** quando há. A aba Gatilho ganha um ponto sempre que existe um gatilho
+definido, do mesmo jeito que as outras marcam o que têm ligado.
+
+**O gatilho segura** — quais engines esperam o gatilho. Desmarque uma e ela roda
+assim que você apertar Armar, enquanto as marcadas continuam esperando o botão.
+Dá para segurar o botão do mouse para clicar com a macro de teclado rodando o
+tempo todo, ou o contrário. Só vale no `Age enquanto o botão do mouse é
+segurado`: os outros modos decidem a rodada inteira, não o que acontece dentro
+dela.
 
 **Atraso ao iniciar** — segundos antes de começar. Tire o cursor da janela
 primeiro, senão o autoclicker clica no próprio botão Parar.
@@ -237,6 +260,26 @@ Aí ele passa a aparecer como ⌨ e recebe a tecla direto. Dois poréns honestos
 programa que lê input raw pode ignorar evento sintético do X11, e isto vale só
 para teclado — clique segue o cursor, não o foco, então mirar clique numa janela
 exigiria teleportar seu ponteiro.
+
+### Atualizações
+
+Instalado por pacote ou pelo `install.sh`, não existe lugar onde uma versão
+nova se anuncie — então o WayClick pergunta ao repositório. Quando existe
+release mais nova que a sua, aparece uma barra no topo com o botão **Baixar**,
+que abre aquela release; o `×` esconde até a próxima abertura, de propósito: a
+graça é justamente avisar **toda** vez que você abrir, até você atualizar.
+Iniciado com `--tray`, o aviso chega como notificação da bandeja, já que não há
+janela onde pôr a barra.
+
+Pergunta primeiro ao GitHub e cai no GitLab — o projeto vive nos dois e
+qualquer um responde sem login. A resposta fica em cache e a pergunta é feita
+no máximo uma vez por dia, nunca na thread da interface, então rede ruim não
+atrasa a janela abrir. **Ajuda > Procurar atualizações** pergunta na hora e
+responde mesmo quando não há novidade; **Configurações > Procurar atualizações
+ao abrir** desliga a checagem automática, e aí nada é requisitado.
+
+Nada é baixado nem instalado por você: o botão abre a página da release e você
+atualiza do jeito que instalou.
 
 ### Anti-AFK
 
@@ -334,6 +377,9 @@ partir da raiz do projeto:
 ```bash
 sg input -c "python3 tests/t_hold.py"        # modo segurar de ponta a ponta, com mouse falso
 sg input -c "python3 tests/t_hold_keyonly.py"  # modo segurar acionando só a macro de teclado
+sg input -c "python3 tests/t_trigger_scope.py" # teclado solto enquanto o clique espera o botão
+python3 tests/t_multikey.py                  # várias teclas ao mesmo tempo, cada uma no seu intervalo
+python3 tests/t_update.py                    # aviso de versão nova: compara, guarda e mostra
 sg input -c "python3 tests/t_clone.py"       # pergunta ao KWin via D-Bus se o clone herdou sua config
 sg input -c "python3 tests/t_hotkey.py"      # atalho global, com teclado falso
 sg input -c "python3 tests/t_relay_lat.py"   # latência do relay sob carga de 10 kHz

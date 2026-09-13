@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
+a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
 a.CFG = "/tmp/autoclick-test-config.json"
 app = QApplication(sys.argv)
 c = QLabel("catcher"); c.setAlignment(Qt.AlignCenter)

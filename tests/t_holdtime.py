@@ -13,6 +13,7 @@ sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 import wayclick as a
+a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
 
 app = QApplication(sys.argv)
 w = QLabel("medindo duração da tecla")

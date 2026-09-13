@@ -11,6 +11,7 @@ _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 import wayclick as a
+a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
 import os as _os                       # config isolada e limpa por teste
 a.CFG = f"/tmp/wayclick-test-{_os.path.basename(__file__)}.json"
 _os.path.exists(a.CFG) and _os.remove(a.CFG)
