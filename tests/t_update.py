@@ -26,6 +26,7 @@ R["junk"] = a.newer_version("")                     # sem resposta: não avisa
 
 
 def app_with(cfg_name, cfg):
+    """Cada App abre uma janela; quem chama fecha, senao elas se acumulam."""
     a.CFG = os.path.join(TMP, cfg_name)
     json.dump(cfg, open(a.CFG, "w"))
     return a.App()
@@ -37,7 +38,7 @@ w = app_with("same.json", {"update_tag": f"v{a.VERSION}",
 w.show()
 app.processEvents()
 R["bar_same"] = w.update_bar.isVisible()
-w.cleanup()
+w.cleanup(); w.close()
 
 # --- versão nova em cache: avisa na abertura, sem tocar na rede -----------
 w = app_with("new.json", {"update_tag": "v99.0.0", "update_last": time.time(),
@@ -51,7 +52,7 @@ w._dismiss_update()
 app.processEvents()
 R["bar_dismissed"] = w.update_bar.isVisible()
 R["y_without"] = w.tabs.y()
-w.cleanup()
+w.cleanup(); w.close()
 saved = json.load(open(a.CFG))
 R["kept_tag"] = saved.get("update_tag")
 R["kept_flag"] = saved.get("update_check")
@@ -61,12 +62,12 @@ w = a.App()
 w.show()
 app.processEvents()
 R["bar_reopened"] = w.update_bar.isVisible()
-w.cleanup()
+w.cleanup(); w.close()
 
 # --- desligado nas configurações: não consulta ----------------------------
 w = app_with("off.json", {"update_check": False})
 R["auto_off"] = w.update_auto
-w.cleanup()
+w.cleanup(); w.close()
 
 print(f"compara: igual={R['same']!r} nova={R['newer']!r} "
       f"antiga={R['older']!r} vazia={R['junk']!r}")
