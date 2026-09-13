@@ -295,6 +295,10 @@ latência do relay ficou em 0,02 ms de mediana sob carga de 10.000 cliques/s,
 então o ponteiro continua liso. A captura é liberada ao parar, ao sair, e pelo
 kernel se o processo morrer.
 
+O gatilho só é engolido quando o clique está ligado, que é quando o autoclicker
+reemite no lugar dele. Segure o botão para acionar só a macro de teclado e ele é
+repassado normalmente — você fica com o seu botão e com a macro.
+
 ## Problemas comuns
 
 **"Atalho global DESLIGADO"** — você não está no grupo `input`, ou a sessão
@@ -329,6 +333,7 @@ partir da raiz do projeto:
 
 ```bash
 sg input -c "python3 tests/t_hold.py"        # modo segurar de ponta a ponta, com mouse falso
+sg input -c "python3 tests/t_hold_keyonly.py"  # modo segurar acionando só a macro de teclado
 sg input -c "python3 tests/t_clone.py"       # pergunta ao KWin via D-Bus se o clone herdou sua config
 sg input -c "python3 tests/t_hotkey.py"      # atalho global, com teclado falso
 sg input -c "python3 tests/t_relay_lat.py"   # latência do relay sob carga de 10 kHz

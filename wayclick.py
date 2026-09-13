@@ -602,15 +602,22 @@ class MouseHold(QObject):
     medido: 0 de 20. Por isso a captura (EVIOCGRAB): o compositor deixa de ver
     o mouse real e passa a ver só o nosso, e nós repassamos tudo (movimento,
     roda, outros botões) menos o botão-gatilho, que vira o autoclick.
+
+    `swallow` é o que decide isso: engolir o gatilho só faz sentido quando o
+    Clicker vai reemitir no lugar dele. Com o clique desligado — segurar o
+    botão para disparar só a macro de teclado, por exemplo — ninguém reemite,
+    e engolir deixaria o botão do usuário morto enquanto estivesse armado.
+    Nesse caso o gatilho é repassado normalmente, além de acionar a macro.
     """
     pressed = Signal()
     released = Signal()
     failed = Signal(str)
 
-    def __init__(self, mouse, button_code, only=None):
+    def __init__(self, mouse, button_code, only=None, swallow=True):
         super().__init__()
         self.mouse, self.button = mouse, button_code
         self.only = only              # captura só o mouse escolhido na UI
+        self.swallow = swallow        # lido a cada evento: muda junto com a UI
         self.files = []
         self._run = False
         self._thread = None
@@ -662,7 +669,8 @@ class MouseHold(QObject):
                             self.pressed.emit()
                         elif value == 0:
                             self.released.emit()
-                        continue                 # gatilho não é repassado
+                        if self.swallow:
+                            continue             # o Clicker reemite no lugar
                     keep += data[i:i + EVENT_SIZE]
                 if keep:
                     try:
@@ -1273,8 +1281,8 @@ TRANSLATIONS = {
         "Left": "Esquerdo", "Right": "Direito", "Middle": "Meio",
         "Repeat": "Repetir", "Hold": "Segurar",
         "Hotkey toggles": "Atalho liga e desliga",
-        "Clicks while hotkey is held": "Age enquanto o atalho é segurado",
-        "Clicks while mouse button is held":
+        "Runs while hotkey is held": "Age enquanto o atalho é segurado",
+        "Runs while mouse button is held":
             "Age enquanto o botão do mouse é segurado",
         "never": "nunca", "Rescan mice": "Reprocurar mouses",
         "Sound feedback on hotkey": "Som ao acionar o atalho",
@@ -1670,9 +1678,11 @@ def set_autostart(on):
 
 
 # ------------------------------------------------------------------ UI ------
+# "Runs" e não "Clicks": o modo gateia tudo o que estiver ligado — clique,
+# macro de teclado e tecla direcionada —, não só o clique.
 MODES = {"Hotkey toggles": "toggle",
-         "Clicks while hotkey is held": "hotkey_hold",
-         "Clicks while mouse button is held": "mouse_hold"}
+         "Runs while hotkey is held": "hotkey_hold",
+         "Runs while mouse button is held": "mouse_hold"}
 CFG = os.path.join(XDG_CONFIG, "wayclick.json")
 
 
@@ -1791,6 +1801,7 @@ class App(QWidget):
         self.key_box = QCheckBox(_("Enable the keyboard macro"))
         self.key_box.setChecked(cfg.get("key_enabled", False))
         self.key_box.toggled.connect(self._key_box_toggled)
+        self.click_box.toggled.connect(self._click_box_toggled)
 
         form = QFormLayout()
         self._row(form, "Mode:", self.mode)
@@ -2418,7 +2429,8 @@ class App(QWidget):
     def _arm_hold(self):
         path = self.selected_mouse()[0]
         self.holder = MouseHold(self.mouse, BTN[self.btn_sel.currentData()],
-                                only=[path] if path else None)
+                                only=[path] if path else None,
+                                swallow=self.click_box.isChecked())
         self.holder.pressed.connect(self._start_clicking)
         self.holder.released.connect(self._hold_released)
         self.holder.failed.connect(self._hold_failed)
@@ -2479,16 +2491,51 @@ class App(QWidget):
                 return False
         return True
 
+    def _click_box_toggled(self, on):
+        """Ligar/desligar o clique vale na hora, sem exigir parar e começar de
+        novo — e desligar só derruba o clique, não a macro nem a tecla alvo."""
+        self._sync_hold_swallow(on)
+        if not (self.running and self._state == "run"):
+            return
+        if on and not self.clicker:
+            self.clicker = Clicker(self.mouse, self.interval.value(),
+                                   BTN[self.btn_sel.currentData()])
+            self.clicker.start()
+        elif not on and self.clicker:
+            self.clicker.stop()
+            self.clicker = None
+        self._show_status()
+
+    def _sync_hold_swallow(self, on):
+        """Sem clique não há quem reemita o botão-gatilho: o relay tem que
+        deixá-lo passar, senão o botão do usuário morre enquanto armado."""
+        if self.holder:
+            self.holder.swallow = on
+
     def _key_box_toggled(self, on):
         """Cria/destroi o device só quando a macro é ligada — evita deixar um
-        teclado virtual pendurado na sessão de quem não usa a função."""
+        teclado virtual pendurado na sessão de quem não usa a função.
+
+        Desligar a macro derruba só a macro: _stop_clicker() levaria junto o
+        clique e a tecla direcionada, que não têm nada a ver com esta caixa.
+        """
         if on:
             self.ensure_keyboard()
+            if self.running and self._state == "run" and not self.keymacro:
+                self.keymacro = KeyMacro(self.keyboard, self.key_interval.value(),
+                                         self.key_sel.code,
+                                         self.key_mode.currentData() == "Hold")
+                self.keymacro.start()
         else:
-            self._stop_clicker() if self.keymacro else None
-            if self.keyboard:
+            if self.keymacro:
+                self.keymacro.stop()
+                self.keymacro = None
+            # a janela alvo pura Wayland injeta pelo mesmo teclado virtual:
+            # só fechar o device quando ninguém mais depende dele
+            if self.keyboard and not self.target_box.isChecked():
                 self.keyboard.close()
                 self.keyboard = None
+        self._show_status()
 
     # ------------------------------------------ janela alvo (beta) --------
     def refresh_windows(self):

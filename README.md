@@ -189,8 +189,8 @@ Ctrl, Alt, Super) do not repeat, so they stay cleanly held.
 **Mode**
 
 - `Hotkey toggles` — press the hotkey to start, press again to stop.
-- `Clicks while hotkey is held` — runs only while the key stays down.
-- `Clicks while mouse button is held` — arm it, then it runs only while you
+- `Runs while hotkey is held` — runs only while the key stays down.
+- `Runs while mouse button is held` — arm it, then it runs only while you
   physically hold the mouse button. Release and it stops, still armed.
 
 **Start delay** — seconds before it begins. Move the cursor off the window
@@ -293,6 +293,10 @@ latency measured at 0.02 ms median under a 10,000 clicks/s load, so the pointer
 stays smooth. The grab is released on stop, on quit, and by the kernel if the
 process dies.
 
+The trigger is only swallowed when clicking is enabled, since that is when the
+autoclicker reemits it. Hold the button to drive just the keyboard macro and it
+is relayed as usual — you keep your button and get the macro.
+
 ## Troubleshooting
 
 **"Global hotkey OFF"** — you are not in the `input` group, or the session
@@ -324,6 +328,7 @@ input devices and measure real behaviour. Run them from the project root:
 
 ```bash
 sg input -c "python3 tests/t_hold.py"        # hold mode end to end, with a fake mouse
+sg input -c "python3 tests/t_hold_keyonly.py"  # hold mode driving only the keyboard macro
 sg input -c "python3 tests/t_clone.py"       # asks KWin over D-Bus if the clone inherited your settings
 sg input -c "python3 tests/t_hotkey.py"      # global hotkey, with a fake keyboard
 sg input -c "python3 tests/t_relay_lat.py"   # relay latency under a 10 kHz click load

@@ -47,7 +47,7 @@ cat.showFullScreen()
 w = a.App()
 w.click_box.setChecked(True); w.key_box.setChecked(False)
 app.aboutToQuit.connect(w.cleanup)
-w.mode.setCurrentText("Clicks while mouse button is held")
+w.mode.setCurrentText("Runs while mouse button is held")
 w.delay.setValue(0); w.duration.setValue(0); w.interval.setValue(20.0)
 w.sound.setChecked(False)
 

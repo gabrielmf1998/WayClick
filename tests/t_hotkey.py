@@ -53,7 +53,7 @@ def step():
         app.quit()
         return
     if desc.startswith("hold"):
-        w.mode.setCurrentText("Clicks while hotkey is held")
+        w.mode.setCurrentText("Runs while hotkey is held")
     action()
     QTimer.singleShot(250, lambda: check(desc, expect))
 
