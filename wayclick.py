@@ -42,6 +42,7 @@ UPDATE_SOURCES = (
 )
 UPDATE_EVERY = 24 * 3600      # a resposta fica em cache; o aviso, esse é toda vez
 AUTO_UPDATE_CHECK = True      # os testes desligam: a suíte não pode depender de rede
+SYSTEM_TRAY = True            # idem: cada App monta um ícone, e a suíte monta vários
 
 
 def parse_version(text):
@@ -2421,7 +2422,7 @@ class App(QWidget):
     # ------------------------------------------------------------- tray --
     def _build_tray(self):
         self.tray = None
-        if not QSystemTrayIcon.isSystemTrayAvailable():
+        if not SYSTEM_TRAY or not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray = QSystemTrayIcon(self._tray_pixmap(), self)
         menu = QMenu()
@@ -3241,6 +3242,12 @@ class App(QWidget):
                            "language": LANG}, fh)
         except Exception:
             pass
+        # por último: o resto da limpeza ainda repinta o estado, e repintar
+        # uma bandeja já removida estouraria
+        if self.tray:
+            self.tray.hide()
+            self.tray.setParent(None)
+            self.tray = None
 
 
 USAGE = f"""WayClick {VERSION} — autoclicker for Wayland, via /dev/uinput

@@ -10,6 +10,7 @@ import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
 a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
+a.SYSTEM_TRAY = False         # sem icone de bandeja nos testes
 import os as _os                       # config isolada e limpa por teste
 a.CFG = f"/tmp/autoclick-test-{_os.path.basename(__file__)}.json"
 _os.path.exists(a.CFG) and _os.remove(a.CFG)

@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 import wayclick as a
 a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
+a.SYSTEM_TRAY = False         # sem icone de bandeja nos testes
 a.CFG = f"/tmp/wayclick-test-{_o.path.basename(__file__)}.json"
 _o.path.exists(a.CFG) and _o.remove(a.CFG)
 

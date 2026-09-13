@@ -12,6 +12,7 @@ import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
 a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
+a.SYSTEM_TRAY = False         # sem icone de bandeja nos testes
 
 TMP = "/tmp/autoclick-test-update"
 os.makedirs(TMP, exist_ok=True)

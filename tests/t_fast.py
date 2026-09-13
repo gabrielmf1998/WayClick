@@ -5,6 +5,7 @@ import sys as _sys, os as _o
 _sys.path.insert(0, _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))))
 import wayclick as a
 a.AUTO_UPDATE_CHECK = False   # sem rede nos testes
+a.SYSTEM_TRAY = False         # sem icone de bandeja nos testes
 a.CFG = "/tmp/autoclick-test-config.json"
 
 ms = float(sys.argv[1])
